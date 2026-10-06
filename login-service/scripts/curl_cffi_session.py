@@ -32,6 +32,15 @@ def emit(value: dict) -> None:
     sys.stdout.flush()
 
 
+def curl_proxy_url(proxy: str) -> str:
+    parsed = urlsplit(proxy)
+    if parsed.scheme.lower() == "socks5":
+        # curl's socks5 resolves the destination locally; these proxy exits
+        # need the SOCKS server to resolve the hostname instead.
+        return parsed._replace(scheme="socks5h").geturl()
+    return proxy
+
+
 def main() -> None:
     session = create_session()
     for line in sys.stdin:
@@ -53,10 +62,9 @@ def main() -> None:
                 return
             direct = bool(request.get("direct", False))
             proxy = "" if direct else str(request.get("proxy") or os.environ.get("APP_PROXY") or "").strip()
-            parsed = urlsplit(proxy if "://" in proxy else (f"http://{proxy}" if proxy else ""))
             # The production image contains no legacy proxy-runtime package.
             # curl_cffi accepts normal proxy URLs (including credentials) directly.
-            proxy_for_request = proxy
+            proxy_for_request = curl_proxy_url(proxy)
             session.proxies = ({"http": proxy_for_request, "https": proxy_for_request} if proxy_for_request else {})
             body = request.get("body")
             raw_body = base64.b64decode(body) if body else None
@@ -84,7 +92,7 @@ def main() -> None:
             # Do not retain the previous request/response while the idle worker
             # waits for its next input (reset also drops session cookies).
             line = request = body = raw_body = response = headers = None
-            proxy = proxy_for_request = parsed = key = value = None
+            proxy = proxy_for_request = key = value = None
             if bridge is not None:
                 try:
                     bridge.stop()
