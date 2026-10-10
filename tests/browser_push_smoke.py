@@ -10,6 +10,66 @@ from urllib.parse import urlparse, parse_qs
 from playwright.sync_api import expect
 
 
+SUB2_PARAMETERS = {
+    'accountConcurrency': 27, 'priority': 9, 'loadFactor': 3200,
+    'fingerprintMode': 'device', 'models': ['fixture-model-c', 'fixture-model-d'],
+}
+SUB2_DEFAULTS = {
+    'accountConcurrency': 50, 'priority': 1, 'loadFactor': 1000,
+    'fingerprintMode': 'session', 'models': ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra'],
+}
+SUB2_FIELD_NAMES = {
+    'accountConcurrency': 'concurrency', 'priority': 'priority', 'loadFactor': 'load-factor',
+    'fingerprintMode': 'fingerprint-mode', 'models': 'models',
+}
+
+
+def assert_sub2_parameters(page, parameters=SUB2_PARAMETERS):
+    for prefix in ['sub2api', 'login-sub2']:
+        for key, suffix in SUB2_FIELD_NAMES.items():
+            field = page.locator(f'#{prefix}-{suffix}')
+            if key == 'models':
+                assert re.split(r'[\s,;]+', field.input_value().strip()) == parameters[key]
+            else:
+                expect(field).to_have_value(str(parameters[key]))
+
+
+def assert_sub2_account(account):
+    assert account['concurrency'] == SUB2_PARAMETERS['accountConcurrency']
+    assert account['priority'] == SUB2_PARAMETERS['priority']
+    assert account['load_factor'] == SUB2_PARAMETERS['loadFactor']
+    assert account['extra']['codex_fingerprint_mode'] == SUB2_PARAMETERS['fingerprintMode']
+    assert account['credentials']['model_mapping'] == {model: model for model in SUB2_PARAMETERS['models']}
+
+
+def exercise_sub2_legacy_settings(source):
+    original = source.evaluate('() => browserWorkspace.read()')
+    legacy = {'accountConcurrency': 12, 'priority': 4, 'loadFactor': 1800,
+              'fingerprintMode': 'off', 'models': ['fixture-legacy-model']}
+    for saved_settings in [True, False]:
+        snapshot = json.loads(json.dumps(original))
+        if not saved_settings:
+            snapshot['state']['browserSettings'].pop('sub2apiSettings', None)
+        for field in snapshot['fields']:
+            for key, suffix in SUB2_FIELD_NAMES.items():
+                if field['id'] == f'sub2api-{suffix}':
+                    field['value'] = ', '.join(legacy[key]) if key == 'models' else str(legacy[key])
+                elif field['id'] == f'login-sub2-{suffix}':
+                    field['value'] = 'fixture-conflicting-model' if key == 'models' else ('full' if key == 'fingerprintMode' else '1')
+        context = source.context.browser.new_context()
+        try:
+            page = context.new_page()
+            page.route('**/workspace-test-seed', lambda route: route.fulfill(status=200, content_type='text/html', body='<script src="/browser-store.js"></script>'))
+            page.goto(source.url.rstrip('/') + '/workspace-test-seed')
+            page.evaluate('(snapshot) => browserWorkspace.save(snapshot)', snapshot)
+            page.goto(source.url)
+            assert_sub2_parameters(page, SUB2_PARAMETERS if saved_settings else legacy)
+            page.locator('#open-sub2-push-config').click()
+            assert_sub2_parameters(page, SUB2_PARAMETERS if saved_settings else legacy)
+        finally:
+            context.close()
+
+
 def exercise_push(page, login_plans):
     calls = []
     fail_sub2 = [True]
@@ -71,7 +131,7 @@ def exercise_push(page, login_plans):
                 results = []
                 for index, account in enumerate(body['accounts']):
                     assert account['group_ids'] == [7]
-                    assert account['concurrency'] == 50
+                    assert_sub2_account(account)
                     failed = len(body['accounts']) > 1 and index == 1 and fail_sub2[0]
                     if failed:
                         fail_sub2[0] = False
@@ -109,9 +169,33 @@ def exercise_push(page, login_plans):
         expect(page.locator('#push-login-personal, #push-login-business')).to_have_count(0)
         page.locator('#open-sub2-push-config').click()
         expect(page.locator('#sub2-push-dialog')).to_be_visible()
+        page.locator('.push-account-options summary').click()
+        page.locator('#login-sub2-concurrency').fill('23')
+        page.locator('#login-sub2-priority').fill('7')
+        page.locator('#login-sub2-load-factor').fill('2500')
+        page.locator('#login-sub2-fingerprint-mode').select_option('full')
+        page.locator('#login-sub2-models').fill('fixture-model-a;fixture-model-b\nfixture-model-a')
+        page.locator('#save-login-sub2-config').click()
+        assert_sub2_parameters(page, {'accountConcurrency': 23, 'priority': 7, 'loadFactor': 2500,
+                                     'fingerprintMode': 'full', 'models': ['fixture-model-a', 'fixture-model-b']})
+        page.get_by_role('button', name='关闭 Sub2API 配置', exact=True).click()
+        page.locator('.top-nav [data-format="sub2api"]').click()
+        page.locator('#sub2api-concurrency').fill('27')
+        page.locator('#sub2api-priority').fill('9')
+        page.locator('#sub2api-load-factor').fill('3200')
+        page.locator('#sub2api-fingerprint-mode').select_option('device')
+        page.locator('#sub2api-models').fill('fixture-model-c, fixture-model-d;fixture-model-c')
+        page.locator('#open-sub2-push-config').click()
+        assert_sub2_parameters(page)
         page.locator('#save-login-sub2-config').click()
         expect(page.locator('#login-sub2-status')).to_contain_text('账号参数已加密保存')
         assert not calls, 'Saving local export settings must not call the remote service'
+        page.get_by_role('button', name='关闭 Sub2API 配置', exact=True).click()
+        page.reload()
+        assert_sub2_parameters(page)
+        exercise_sub2_legacy_settings(page)
+        page.locator('.top-nav [data-format="protocol-login"]').click()
+        page.locator('#open-sub2-push-config').click()
         page.locator('#login-sub2-base-url').fill(remote_url + '/admin')
         page.locator('#login-sub2-admin-key').fill('fixture-sub2-key')
         page.locator('#load-login-sub2-groups').click()
@@ -180,6 +264,8 @@ def exercise_push(page, login_plans):
                 data = json.loads(Path(download.value.path()).read_text(encoding='utf-8'))
                 assert len(data['accounts']) == count
                 assert all(account['credentials']['plan_type'].strip().lower() == 'free' for account in data['accounts'])
+                for account in data['accounts']:
+                    assert_sub2_account(account)
 
         # Neither an explicit opt-out nor Session-only login auto-pushes.
         login_plans.update(personal='plus', business='business')
@@ -216,6 +302,7 @@ def exercise_push(page, login_plans):
         page.locator('#open-sub2-push-config').click()
         expect(page.locator('#login-sub2-admin-key')).to_have_value('fixture-sub2-key')
         expect(page.locator('[data-sub2-group-id="7"]')).to_be_checked()
+        assert_sub2_parameters(page)
         page.keyboard.press('Escape')
 
         # Session conversion uses the same CPA payload as the local export.
@@ -377,6 +464,7 @@ def exercise_clear_login(source):
             expect(check_page.locator('#login-proxy-local-port')).to_have_value('8899')
             expect(check_page.locator('#cpa-management-key')).to_have_value('fixture-cpa-key')
             expect(check_page.locator('#login-sub2-admin-key')).to_have_value('fixture-sub2-key')
+            assert_sub2_parameters(check_page)
         saved = page.evaluate('() => browserWorkspace.read()')
         raw = json.dumps(saved)
         for secret in ['FixturePassword!', 'JBSWY3DPEHPK3PXP', 'fixture@example.com', 'fixture-personal-rt', 'fixture-business-rt', 'fixture-session-rt', 'fixture-session-access']:
@@ -394,6 +482,7 @@ def exercise_clear_login(source):
         page.locator('#open-sub2-push-config').click()
         expect(page.locator('[data-sub2-group-id="7"]')).to_be_checked()
         expect(page.locator('#login-sub2-admin-key')).to_have_value('fixture-sub2-key')
+        assert_sub2_parameters(page)
         page.keyboard.press('Escape')
         page.once("dialog", lambda dialog: dialog.accept())
         page.locator('#clear-browser-data').click()
@@ -401,6 +490,7 @@ def exercise_clear_login(source):
         expect(page.locator('#login-proxy-pool')).to_have_value('')
         expect(page.locator('#login-sub2-admin-key')).to_have_value('')
         expect(page.locator('#cpa-management-key')).to_have_value('')
+        assert_sub2_parameters(page, SUB2_DEFAULTS)
         assert page.evaluate('async () => (await browserWorkspace.read()) === undefined')
         assert not errors, errors
     finally:

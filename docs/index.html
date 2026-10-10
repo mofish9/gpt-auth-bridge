@@ -80,7 +80,7 @@
         </label>
         <label>
           导出账号并发
-          <input id="sub2api-concurrency" type="number" min="1" max="1000" step="1" value="50" />
+          <input id="sub2api-concurrency" type="number" min="1" max="100" step="1" value="50" />
         </label>
         <label>
            负载因子（load_factor）
@@ -88,7 +88,7 @@
         </label>
         <label>
           优先级
-          <input id="sub2api-priority" type="number" min="1" step="1" value="1" />
+          <input id="sub2api-priority" type="number" min="1" max="100" step="1" value="1" />
         </label>
         <label>
           Codex 指纹收敛
@@ -404,9 +404,9 @@
           <div class="login-sub2-grid">
             <label>每账号并发<input id="login-sub2-concurrency" type="number" min="1" max="100" step="1" value="50" /></label>
             <label>优先级<input id="login-sub2-priority" type="number" min="1" max="100" step="1" value="1" /></label>
-            <label>负载因子<input id="login-sub2-load-factor" type="number" min="1" max="10000" step="1" value="1" /></label>
-            <label>指纹收敛<select id="login-sub2-fingerprint-mode"><option value="off">关闭（透传）</option><option value="device">仅设备</option><option value="session">设备+会话</option><option value="full" selected>完全收敛</option></select></label>
-            <label class="wide">模型（逗号或换行）<textarea id="login-sub2-models" rows="3" spellcheck="false">gpt-5.5&#10;gpt-5.6-sol&#10;gpt-5.6-terra</textarea></label>
+            <label>负载因子<input id="login-sub2-load-factor" type="number" min="1" max="10000" step="1" value="1000" /></label>
+            <label>指纹收敛<select id="login-sub2-fingerprint-mode"><option value="off">关闭（透传）</option><option value="device">仅设备</option><option value="session" selected>设备+会话</option><option value="full">完全收敛</option></select></label>
+            <label class="wide">模型（逗号、空格或换行）<textarea id="login-sub2-models" rows="3" spellcheck="false">gpt-5.5&#10;gpt-5.6-sol&#10;gpt-5.6-terra&#10;gpt-6-astra</textarea></label>
           </div>
         </details>
       </div>

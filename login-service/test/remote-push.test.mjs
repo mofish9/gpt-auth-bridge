@@ -26,6 +26,8 @@ test('stale browser leases cannot deliver automated pushes to either destination
 test('monitor updates the exact email/workspace within selected groups and preserves remote settings', async t => {
   const calls = [];
   const input = sub2Account('a@example.com');
+  Object.assign(input, { concurrency: 23, load_factor: 2500, priority: 7, extra: { codex_fingerprint_mode: 'full' } });
+  input.credentials.model_mapping = { fixture: 'fixture' };
   input.credentials.chatgpt_account_id = 'team';
   const push = await fixture(t, async (url, options) => {
     calls.push(options.method);
@@ -35,12 +37,14 @@ test('monitor updates the exact email/workspace within selected groups and prese
       return Response.json({ code: 0, data: { total: 3, items: [
         { id: 1, platform: 'openai', type: 'oauth', group_ids: [7], credentials: { email: 'other@example.com', chatgpt_account_id: 'team' } },
         { id: 2, platform: 'openai', type: 'oauth', group_ids: [8], credentials: input.credentials },
-        { id: 3, name: 'renamed-by-operator', platform: 'openai', type: 'oauth', group_ids: [7], credentials: { ...input.credentials, preserved: true } },
+        { id: 3, name: 'renamed-by-operator', platform: 'openai', type: 'oauth', group_ids: [7], concurrency: 3, load_factor: 5, priority: 1,
+          extra: { codex_fingerprint_mode: 'off' }, credentials: { ...input.credentials, model_mapping: { old: 'old' }, preserved: true } },
       ] } });
     }
     assert.equal(url, 'https://sub2.test/api/v1/admin/accounts/3');
     assert.equal(options.method, 'PUT');
-    assert.deepEqual(JSON.parse(options.body), { credentials: { ...input.credentials, preserved: true } });
+    const { model_mapping, ...credentials } = input.credentials;
+    assert.deepEqual(JSON.parse(options.body), { credentials: { ...credentials, model_mapping: { old: 'old' }, preserved: true } });
     return Response.json({ code: 0, data: { id: 3 } });
   });
   const result = await push('sub2api', { settings: { baseUrl: 'https://sub2.test', adminApiKey: 'key', groupIds: [7] }, accounts: [input], upsert: true });
@@ -85,9 +89,14 @@ test('Sub2API uses batch creation contract and reports partial results without e
     assert.equal(options.redirect, 'error');
     const body = JSON.parse(options.body);
     assert.deepEqual(body.accounts.map(row => row.group_ids), [[7, 9], [7, 9]]);
+    assert.equal(body.accounts[0].load_factor, 2500);
+    assert.equal(body.accounts[0].concurrency, 23);
+    assert.deepEqual(body.accounts[0].credentials.model_mapping, { fixture: 'fixture' });
     return Response.json({ code: 0, data: { success: 1, failed: 1, results: [{ success: true, id: 123 }, { success: false, error: 'secret fixture-access' }] } });
   });
-  const result = await push('sub2api', { settings: { baseUrl: 'https://sub2.test/prefix/admin', adminApiKey: 'fixture-secret', groupIds: [7, 9] }, accounts: [sub2Account('a@example.com'), sub2Account('b@example.com')] });
+  const account = { ...sub2Account('a@example.com'), load_factor: 2500, concurrency: 23 };
+  account.credentials.model_mapping = { fixture: 'fixture' };
+  const result = await push('sub2api', { settings: { baseUrl: 'https://sub2.test/prefix/admin', adminApiKey: 'fixture-secret', groupIds: [7, 9] }, accounts: [account, sub2Account('b@example.com')] });
   assert.equal(result.status, 200);
   assert.equal(result.body.ok, false);
   assert.equal(result.body.imported, 1);
@@ -95,6 +104,36 @@ test('Sub2API uses batch creation contract and reports partial results without e
   assert.deepEqual(result.body.results.map(row => row.status), ['success', 'failed']);
   assert.doesNotMatch(JSON.stringify(result), /fixture-secret|fixture-access|fixture-rt|browserState/);
 });
+test('Sub2API reconciliation checks account parameters while renewal preserves remote settings', async t => {
+  const account = { ...sub2Account('fixture@example.com'), concurrency: 23, load_factor: 2500, priority: 7, extra: { codex_fingerprint_mode: 'full' } };
+  account.credentials.chatgpt_account_id = 'fixture-workspace';
+  account.credentials.model_mapping = { 'fixture-a': 'fixture-a', 'fixture-b': 'fixture-b' };
+  let row = { ...structuredClone(account), id: 123, group_ids: [7] };
+  const push = await fixture(t, async (_url, options) => {
+    assert.equal(options.method, 'GET');
+    return Response.json({ code: 0, data: { total: 1, items: [row] } });
+  });
+  const body = { settings: { baseUrl: 'https://sub2.test', adminApiKey: 'key', groupIds: [7] }, accounts: [account] };
+  assert.equal((await push('sub2api/reconcile', body)).body.imported, 1);
+  for (const mismatch of [
+    { concurrency: 3 }, { load_factor: null }, { priority: 1 },
+    { extra: { codex_fingerprint_mode: 'off' } },
+    { credentials: { ...account.credentials, model_mapping: { old: 'old' } } },
+  ]) {
+    row = { ...structuredClone(account), id: 123, group_ids: [7], ...mismatch };
+    const result = (await push('sub2api/reconcile', body)).body;
+    assert.equal(result.imported, 0);
+    assert.equal(result.unknown, 1);
+    assert.equal(result.results[0].code, 'REMOTE_SETTINGS_UNCONFIRMED');
+    assert.equal(result.results[0].retryable, false);
+    assert.equal((await push('sub2api/reconcile', { ...body, upsert: true })).body.imported, 1);
+  }
+  row = { ...structuredClone(account), id: 123, group_ids: [7], credentials: {
+    ...account.credentials, model_mapping: { 'fixture-b': 'fixture-b', 'fixture-a': 'fixture-a' },
+  } };
+  assert.equal((await push('sub2api/reconcile', body)).body.imported, 1);
+});
+
 test('Sub2API unrecognized success response is unconfirmed, never counted as imported', async t => {
   const push = await fixture(t, async () => Response.json({ code: 0, data: {} }));
   const { body } = await push('sub2api', { settings: { baseUrl: 'https://sub2.test', adminApiKey: 'key', groupIds: [1] }, accounts: [sub2Account('fixture@example.com')] });

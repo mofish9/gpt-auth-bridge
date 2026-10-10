@@ -123,6 +123,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     for (const [key, value] of Object.entries(snapshot.settings || {})) {
       state.browserSettings[key] = { ...state.browserSettings[key], ...value };
     }
+    if (snapshot.settings?.sub2apiSettings) restoreSub2apiAccountConfig();
     // Credentials are a durable boundary even when they arrive as a partial SSE
     // snapshot. The caller waits before displaying completion or sending work.
     return persistBrowserWorkspace(true, true);
@@ -860,29 +861,19 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function applySub2apiOutputConfig(account) {
-    const models = Array.from(new Set(String(elements.sub2apiModels.value || "")
-      .split(/[\s,;]+/)
-      .map((value) => value.trim())
-      .filter(Boolean)));
-    const effectiveModels = models.length ? models : ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra"];
-    const concurrency = Math.max(1, Math.min(1000, Math.trunc(Number(elements.sub2apiConcurrency.value) || 50)));
-    const loadFactor = Math.max(1, Math.min(10000, Math.trunc(Number(elements.sub2apiLoadFactor.value) || 1000)));
-    const priority = Math.max(1, Math.trunc(Number(elements.sub2apiPriority.value) || 1));
-    const fingerprintMode = ["off", "device", "session", "full"].includes(elements.sub2apiFingerprintMode.value)
-      ? elements.sub2apiFingerprintMode.value
-      : "session";
+    const settings = normalizeSub2apiAccountConfig(state.browserSettings.sub2apiSettings);
     return {
       ...account,
-      concurrency,
-      load_factor: loadFactor,
-      priority,
+      concurrency: settings.accountConcurrency,
+      load_factor: settings.loadFactor,
+      priority: settings.priority,
       credentials: {
         ...(account?.credentials || {}),
-        model_mapping: Object.fromEntries(effectiveModels.map((model) => [model, model])),
+        model_mapping: Object.fromEntries(settings.models.map((model) => [model, model])),
       },
       extra: {
         ...(account?.extra || {}),
-        codex_fingerprint_mode: fingerprintMode,
+        codex_fingerprint_mode: settings.fingerprintMode,
       },
     };
   }
@@ -2602,7 +2593,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       setStatus(elements.pushStatus, `正在核对 ${items.length} 个账号的远端结果…`);
       const payload = await remotePushRequest(`${target}/reconcile`, {
         operationId: operation.operationId, schemaVersion: OPERATION_SCHEMA_VERSION,
-        itemIds: items.map(item => item.itemId), accounts: items.map(item => item.account), settings,
+        itemIds: items.map(item => item.itemId), accounts: items.map(item => item.account), settings, upsert: operation.upsert === true,
       });
       requireCurrentWorkspace(isCurrent);
       applyPushOperationResults(operation, items, payload);
@@ -2952,16 +2943,61 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     }
   }
 
+  function sub2apiAccountConfigFields(source) {
+    return source === 'login' ? {
+      accountConcurrency: elements.loginSub2Concurrency, priority: elements.loginSub2Priority,
+      loadFactor: elements.loginSub2LoadFactor, fingerprintMode: elements.loginSub2FingerprintMode, models: elements.loginSub2Models,
+    } : {
+      accountConcurrency: elements.sub2apiConcurrency, priority: elements.sub2apiPriority,
+      loadFactor: elements.sub2apiLoadFactor, fingerprintMode: elements.sub2apiFingerprintMode, models: elements.sub2apiModels,
+    };
+  }
+
+  function readSub2apiAccountConfig(source) {
+    const fields = sub2apiAccountConfigFields(source);
+    return {
+      accountConcurrency: Number(fields.accountConcurrency.value || 50),
+      priority: Number(fields.priority.value || 1), loadFactor: Number(fields.loadFactor.value || 1000),
+      fingerprintMode: fields.fingerprintMode.value || 'session',
+      models: fields.models.value.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean),
+    };
+  }
+
+  function normalizeSub2apiAccountConfig(settings = {}) {
+    const integer = (value, fallback, max) => Number.isFinite(Number(value)) && value !== '' && value != null
+      ? Math.max(1, Math.min(max, Math.trunc(Number(value)))) : fallback;
+    const models = [...new Set((Array.isArray(settings.models) ? settings.models : String(settings.models || '').split(/[\s,;]+/))
+      .map(value => String(value).trim()).filter(Boolean))];
+    return {
+      accountConcurrency: integer(settings.accountConcurrency, 50, 100), priority: integer(settings.priority, 1, 100),
+      loadFactor: integer(settings.loadFactor, 1000, 10000),
+      fingerprintMode: ['off', 'device', 'session', 'full'].includes(settings.fingerprintMode) ? settings.fingerprintMode : 'session',
+      models: models.length ? models : ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra'],
+    };
+  }
+
+  function setSub2apiAccountConfig(settings, editingField = null) {
+    const parameters = normalizeSub2apiAccountConfig(settings);
+    state.browserSettings.sub2apiSettings = { ...state.browserSettings.sub2apiSettings, ...parameters };
+    for (const source of ['output', 'login']) {
+      for (const [key, field] of Object.entries(sub2apiAccountConfigFields(source))) {
+        if (field === editingField) continue;
+        field.value = key === 'models' ? parameters.models.join(source === 'login' ? '\n' : ', ') : String(parameters[key]);
+      }
+    }
+  }
+
+  function restoreSub2apiAccountConfig() {
+    // Saved account settings take precedence over conflicting legacy DOM snapshots.
+    setSub2apiAccountConfig({ ...readSub2apiAccountConfig('output'), ...state.browserSettings.sub2apiSettings });
+  }
+
   function loginSub2ConfigPayload() {
     return {
       baseUrl: elements.loginSub2BaseUrl.value.trim(),
       adminApiKey: elements.loginSub2AdminKey.value.trim(),
       groupIds: [...state.loginSub2SelectedGroupIds],
-      accountConcurrency: Number(elements.loginSub2Concurrency.value || 50),
-      priority: Number(elements.loginSub2Priority.value || 1),
-      loadFactor: Number(elements.loginSub2LoadFactor.value || 1),
-      fingerprintMode: elements.loginSub2FingerprintMode.value || "full",
-      models: elements.loginSub2Models.value.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean),
+      ...readSub2apiAccountConfig('login'),
       useProxy: elements.loginSub2UseProxy.checked,
       proxyId: elements.loginSub2UseProxy.checked ? String(elements.loginSub2Proxy.value || '') : '',
     };
@@ -2996,11 +3032,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     elements.loginSub2AdminKey.value = state.browserSettings.sub2apiSettings?.adminApiKey || "";
     state.loginSub2KeyConfigured = Boolean(elements.loginSub2AdminKey.value) || settings.keyConfigured === true;
     state.loginSub2SelectedGroupIds = (settings.groupIds || []).map(Number).filter(Number.isFinite);
-    elements.loginSub2Concurrency.value = String(settings.accountConcurrency || 50);
-    elements.loginSub2Priority.value = String(settings.priority || 1);
-    elements.loginSub2LoadFactor.value = String(settings.loadFactor || 1);
-    elements.loginSub2FingerprintMode.value = settings.fingerprintMode || "full";
-    elements.loginSub2Models.value = (settings.models || ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra"]).join("\n");
+    setSub2apiAccountConfig(settings);
     elements.loginSub2UseProxy.checked = settings.useProxy === true || settings.proxyEnabled === true;
     state.loginSub2ProxyId = String(settings.proxyId ?? settings.proxy_id ?? '');
     renderLoginSub2Proxies();
@@ -3066,9 +3098,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       }
       state.browserSettings.sub2apiSettings = settings;
       state.loginSub2ProxyId = settings.proxyId;
+      fillLoginSub2Config(settings);
+      updateOutput();
       await persistBrowserWorkspace(true, true);
       requireCurrentWorkspace(isCurrent);
-      fillLoginSub2Config(settings);
       state.loginSub2Loaded = true;
       setStatus(elements.loginSub2Status, hasConnection ? `配置已加密保存在此浏览器 · ${settings.groupIds.length} 个推送分组。` : '账号参数已加密保存；配置地址、密钥和分组后可启用推送。', 'ok');
 
@@ -4069,11 +4102,17 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   };
   elements.operationButtons.forEach((button) => button.addEventListener("click", () => selectOperation(button.dataset.operation)));
   bindTabKeyboard("#tool-operation-buttons [role=\"tab\"]", (tab) => selectOperation(tab.dataset.operation));
-  elements.sub2apiModels?.addEventListener("input", updateOutput);
-  elements.sub2apiConcurrency?.addEventListener("input", updateOutput);
-  elements.sub2apiLoadFactor?.addEventListener("input", updateOutput);
-  elements.sub2apiPriority?.addEventListener("input", updateOutput);
-  elements.sub2apiFingerprintMode?.addEventListener("change", updateOutput);
+  for (const source of ['output', 'login']) {
+    for (const [key, field] of Object.entries(sub2apiAccountConfigFields(source))) {
+      const sync = event => {
+        setSub2apiAccountConfig(readSub2apiAccountConfig(source), event.type === 'input' ? field : null);
+        updateOutput();
+        persistBrowserWorkspace();
+      };
+      if (key !== 'fingerprintMode') field?.addEventListener('input', sync);
+      field?.addEventListener('change', sync);
+    }
+  }
   elements.splitScope?.addEventListener("change", updateOutput);
   elements.mailInput?.addEventListener("input", scheduleConvert);
   elements.pickMailFile?.addEventListener("click", () => elements.mailFileInput?.click());
@@ -4153,6 +4192,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         node.disabled = disabled;
       });
       if (retained) restoreBrowserFields(retained.fields);
+      restoreSub2apiAccountConfig();
       syncMonitorChoice();
       loginModalReturnFocus = null;
       hideLoginModal();
@@ -4192,6 +4232,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
           }
         }
         restoreBrowserFields(saved.fields);
+        restoreSub2apiAccountConfig();
         elements.input.value = saved.state.conversionInput?.text || '';
         restoreDerivedWorkspace(saved.state.conversionInput?.sources || []);
         syncMonitorChoice();
@@ -4267,6 +4308,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     clearLoginButton.addEventListener('click', () => clearWorkspace(true));
 
   }
+  restoreSub2apiAccountConfig();
   updateToolControls();
   updateOutput();
   browserStorageReady = browserStorageAvailable;

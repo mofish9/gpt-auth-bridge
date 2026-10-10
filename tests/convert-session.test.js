@@ -127,7 +127,7 @@ function loadPageScript(options = {}) {
 
 function dispatch(element, type) {
   assert.equal(typeof element.listeners[type], "function", `missing ${type} listener on ${element.selector}`);
-  element.listeners[type]({ target: element });
+  element.listeners[type]({ target: element, type });
 }
 
 function jwtWithPayload(payload) {
@@ -184,6 +184,7 @@ function testSub2apiOutputConfigurationOverridesImportedAccount() {
   elements.get("#sub2api-load-factor").value = "2500";
   elements.get("#sub2api-priority").value = "7";
   elements.get("#sub2api-fingerprint-mode").value = "full";
+  dispatch(elements.get("#sub2api-fingerprint-mode"), "change");
   const account = sub2apiAccount("override@example.com", "override");
   account.concurrency = 2;
   account.credentials.model_mapping = { old: "old" };
@@ -217,6 +218,41 @@ function testSub2apiLoadFactorUsesSchedulerFieldNotBillingMultiplier() {
   assert.equal(account.rate_multiplier, 1);
   assert.equal(account.concurrency, 50);
   assert.equal(account.priority, 1);
+}
+
+function testSub2apiAccountParametersSynchronizeBothDirections() {
+  const { elements } = loadPageScript();
+  const pairs = [
+    ['concurrency', '23', '31'], ['load-factor', '2500', '3300'],
+    ['priority', '7', '9'], ['fingerprint-mode', 'full', 'device'],
+  ];
+  for (const [name, loginValue, outputValue] of pairs) {
+    const login = elements.get('#login-sub2-' + name);
+    const output = elements.get('#sub2api-' + name);
+    login.value = loginValue;
+    dispatch(login, name === 'fingerprint-mode' ? 'change' : 'input');
+    assert.equal(output.value, loginValue);
+    output.value = outputValue;
+    dispatch(output, name === 'fingerprint-mode' ? 'change' : 'input');
+    assert.equal(login.value, outputValue);
+  }
+  const models = elements.get('#login-sub2-models');
+  models.value = 'custom-a, custom-b;custom-a\ncustom-c';
+  dispatch(models, 'input');
+  assert.equal(elements.get('#sub2api-models').value, 'custom-a, custom-b, custom-c');
+  const input = elements.get('#session-input');
+  input.value = JSON.stringify({ email: 'fixture@example.com', accessToken: jwtWithPayload({ exp: 2100000000 }) });
+  dispatch(input, 'input');
+  const account = JSON.parse(elements.get('#output').value).accounts[0];
+  assert.equal(account.concurrency, 31);
+  assert.equal(account.load_factor, 3300);
+  assert.equal(account.priority, 9);
+  assert.equal(account.extra.codex_fingerprint_mode, 'device');
+  assert.deepEqual(account.credentials.model_mapping, { 'custom-a': 'custom-a', 'custom-b': 'custom-b', 'custom-c': 'custom-c' });
+  elements.get('#sub2api-concurrency').value = '999';
+  dispatch(elements.get('#sub2api-concurrency'), 'change');
+  assert.equal(elements.get('#sub2api-concurrency').value, '100');
+  assert.equal(elements.get('#login-sub2-concurrency').value, '100');
 }
 
 function testSub2apiAccountsUseTheirOwnAccessTokenExpiry() {
@@ -904,6 +940,7 @@ async function main() {
   testSub2apiAccountUsesAccessTokenExpiry();
   testSub2apiOutputConfigurationOverridesImportedAccount();
   testSub2apiLoadFactorUsesSchedulerFieldNotBillingMultiplier();
+  testSub2apiAccountParametersSynchronizeBothDirections();
   testSub2apiAccountsUseTheirOwnAccessTokenExpiry();
   testSub2apiAccountWithRefreshTokenOmitsAccessTokenExpiry();
   testSyntheticIdTokenHasCodexParseableJwtFormat();

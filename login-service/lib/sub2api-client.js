@@ -1,5 +1,11 @@
 import { requestSignal } from '../src/services/request-scope.js';
 
+function sameModelMapping(expected, actual) {
+  return expected != null && actual != null && typeof expected === 'object' && typeof actual === 'object'
+    && Object.keys(expected).length === Object.keys(actual).length
+    && Object.entries(expected).every(([key, value]) => Object.hasOwn(actual, key) && actual[key] === value);
+}
+
 export class Sub2ApiError extends Error {
   constructor(message, { status = 0, body = null } = {}) {
     super(message);
@@ -146,7 +152,7 @@ export class Sub2ApiClient {
     });
   }
 
-  async reconcileAccount(account, groupIds) {
+  async reconcileAccount(account, groupIds, { credentialsOnly = false } = {}) {
     const matches = await this.matchingAccounts(account, groupIds);
     if (!matches.length) return { status: 'failed', retryable: true, code: 'REMOTE_NOT_FOUND', error: '已确认所选分组中不存在该账号，可以重试' };
     if (matches.length > 1) return { status: 'unknown', retryable: false, code: 'REMOTE_AMBIGUOUS', error: '目标分组存在重复账号，请先在目标服务核对' };
@@ -154,7 +160,12 @@ export class Sub2ApiClient {
     const tokenFields = ['access_token', 'refresh_token', 'id_token'];
     const matchesCredentials = tokenFields.every(field => !account.credentials[field] || row.credentials?.[field] === account.credentials[field]);
     const matchesProxy = !Object.hasOwn(account, 'proxy_id') || Number(row.proxy_id) === Number(account.proxy_id);
-    if (matchesCredentials && matchesProxy) return { status: 'success', retryable: false, code: 'REMOTE_CONFIRMED' };
+    const matchesSettings = credentialsOnly || (['concurrency', 'priority', 'load_factor'].every(field =>
+      !Object.hasOwn(account, field) || row[field] === account[field])
+      && (!Object.hasOwn(account.credentials, 'model_mapping') || sameModelMapping(account.credentials.model_mapping, row.credentials?.model_mapping))
+      && (!Object.hasOwn(account.extra || {}, 'codex_fingerprint_mode') || row.extra?.codex_fingerprint_mode === account.extra.codex_fingerprint_mode));
+    if (matchesCredentials && matchesProxy && matchesSettings) return { status: 'success', retryable: false, code: 'REMOTE_CONFIRMED' };
+    if (matchesCredentials && matchesProxy && !matchesSettings) return { status: 'unknown', retryable: false, code: 'REMOTE_SETTINGS_UNCONFIRMED', error: '目标账号已存在，但账号参数与此次推送不一致，请在目标服务核对' };
     return { status: 'unknown', retryable: false, code: 'REMOTE_VERSION_UNCONFIRMED', error: '目标账号已存在，但无法确认是此次推送的凭据，请在目标服务核对' };
   }
 

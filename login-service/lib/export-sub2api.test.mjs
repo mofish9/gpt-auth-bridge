@@ -42,7 +42,8 @@ import {
   assert.equal(rt.credentials.email, 'a@example.com');
   assert.equal(rt.concurrency, 50);
   assert.equal(rt.priority, 1);
-  assert.equal(rt.load_factor, 1);
+  assert.equal(rt.load_factor, 1000);
+  assert.equal(rt.extra.codex_fingerprint_mode, 'session');
   assert.equal(rt.rate_multiplier, 1);
   assert.equal(rt.auto_pause_on_expired, true);
 }

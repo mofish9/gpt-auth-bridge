@@ -190,7 +190,7 @@ export function registerRemotePushRoutes(app, { fetchImpl = fetch } = {}) {
             signal.throwIfAborted();
             try {
               const result = await runAccountTask(() => target === 'sub2api'
-                ? client.reconcileAccount(pushAccounts[index], settings.groupIds) : client.reconcile(account, files), { signal });
+                ? client.reconcileAccount(pushAccounts[index], settings.groupIds, { credentialsOnly: upsert === true }) : client.reconcile(account, files), { signal });
               results.push({ index, name: account.name || cpaFileName(account), ...result });
             } catch {
               signal.throwIfAborted();

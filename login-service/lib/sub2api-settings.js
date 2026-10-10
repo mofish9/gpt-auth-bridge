@@ -15,7 +15,7 @@ function clampNumber(value, fallback, minimum, maximum, { integer = false } = {}
 }
 
 function uniqueStrings(value) {
-  const source = Array.isArray(value) ? value : String(value || '').split(/[\s,]+/);
+  const source = Array.isArray(value) ? value : String(value || '').split(/[\s,;]+/);
   return [...new Set(source.map(item => String(item || '').trim()).filter(Boolean))];
 }
 
@@ -52,11 +52,11 @@ export function normalizeSub2ApiSettings(value = {}, defaults = {}) {
     legacyGroupName: groupIds.length ? '' : legacyGroupName,
     accountConcurrency: clampNumber(merged.accountConcurrency ?? merged.concurrency, 50, 1, 100, { integer: true }),
     priority: clampNumber(merged.priority, 1, 1, 100, { integer: true }),
-    loadFactor: clampNumber(merged.loadFactor ?? merged.load_factor, 1, 1, 10000, { integer: true }),
+    loadFactor: clampNumber(merged.loadFactor ?? merged.load_factor, 1000, 1, 10000, { integer: true }),
     rateMultiplier: clampNumber(merged.rateMultiplier ?? merged.rate_multiplier, 1, 0, 100000),
     fingerprintMode: SUB2API_FINGERPRINT_MODES.includes(String(merged.fingerprintMode || merged.fingerprint_mode || '').trim())
       ? String(merged.fingerprintMode || merged.fingerprint_mode).trim()
-      : 'full',
+      : 'session',
     models: requestedModels.length ? requestedModels : [...SUB2API_DEFAULT_MODELS],
   };
 }
