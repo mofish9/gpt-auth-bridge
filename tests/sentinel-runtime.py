@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock, patch
@@ -20,7 +21,14 @@ class FixtureHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == '/token':
+        if self.path == '/favicon.ico':
+            self.send_response(204)
+            self.end_headers()
+            return
+        if self.path == '/slow-script':
+            self.server.asset_released.wait(5)
+            body = b'/* unrelated asset */'
+        elif self.path == '/token':
             self.server.token_calls += 1
             number = self.server.token_calls
             if self.server.fail_secondary and number > 1:
@@ -28,6 +36,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return
             body = json.dumps({'p': 'fixture-proof', 'c': str(number), 'mismatch': self.server.mismatch}).encode()
         else:
+            self.server.document_calls += 1
+            status = self.server.statuses.pop(0) if self.server.statuses else 200
+            if status >= 400:
+                self.send_error(status, 'private-upstream-body')
+                return
+            if self.server.no_sdk:
+                body = b'<html>fixture without SDK</html>'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             body = b'''<!doctype html><script>
               window.SentinelSDK = {init() {}, async token(flow) {
                 const response = await fetch('/token');
@@ -41,11 +61,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return JSON.stringify(payload);
               }};
             </script>'''
+        if self.server.block_asset and self.path.startswith('/api/accounts/authorize'):
+            body += b'<script src="/slow-script"></script>'
         self.send_response(200)
         self.send_header('Content-Type', 'text/html' if self.path != '/token' else 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
 
 class SentinelRuntimeTest(unittest.TestCase):
@@ -54,10 +79,16 @@ class SentinelRuntimeTest(unittest.TestCase):
         self.server.token_calls = 0
         self.server.fail_secondary = False
         self.server.mismatch = ''
+        self.server.statuses = []
+        self.server.document_calls = 0
+        self.server.no_sdk = False
+        self.server.block_asset = False
+        self.server.asset_released = threading.Event()
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
     def tearDown(self):
+        self.server.asset_released.set()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
@@ -70,7 +101,7 @@ class SentinelRuntimeTest(unittest.TestCase):
                 patch.object(sentinel, 'FIXED_LOCAL_PROXY_URL', ''), \
                 patch.object(sentinel, 'sync_playwright', wraps=sentinel.sync_playwright) as start:
             result = sentinel.extract_sentinel(auth_base_url=f'http://127.0.0.1:{self.server.server_port}',
-                                               deadline_seconds=15, **options)
+                                               deadline_seconds=options.pop('deadline_seconds', 15), **options)
             self.assertEqual(start.call_count, 1, 'discovery must share the extraction driver')
             return result
 
@@ -136,6 +167,106 @@ class SentinelRuntimeTest(unittest.TestCase):
                 self.extract(device_id='login-device', auth_flow='authorize_continue', include_so_token=False)
 
 
+    def worker_request(self, runtime, **options):
+        return browser_worker.run_request(runtime, {
+            'authBaseUrl': f'http://127.0.0.1:{self.server.server_port}',
+            'deadlineSeconds': 10, 'deviceID': 'fixture-device', 'flow': 'password_verify', **options,
+        }, threading.Event(), lambda *_: None)
+
+    def test_sdk_ready_document_does_not_wait_for_unrelated_scripts(self):
+        self.server.block_asset = True
+        started = time.monotonic()
+        result = self.extract(device_id='fixture-device', auth_flow='password_verify', include_so_token=False)
+        self.assertEqual(json.loads(result['sentinel_token'])['id'], 'fixture-device')
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertFalse(self.server.asset_released.is_set())
+
+    def test_aborted_navigation_can_use_already_ready_document(self):
+        goto = Page.goto
+        calls = []
+        def interrupted(page, *args, **kwargs):
+            calls.append(1)
+            goto(page, *args, **kwargs)
+            raise PlaywrightError('Page.goto: net::ERR_ABORTED at private-url')
+        with patch.object(Page, 'goto', interrupted):
+            result = self.extract(device_id='fixture-device', auth_flow='password_verify', include_so_token=False)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(json.loads(result['sentinel_token'])['id'], 'fixture-device')
+        self.assertEqual(self.server.token_calls, 1)
+
+    def test_transient_http_error_recovers_with_same_browser_and_fresh_context(self):
+        self.server.statuses = [503, 200]
+        runtime = browser_worker.BrowserRuntime()
+        goto = Page.goto
+        contexts = []
+        def track(page, *args, **kwargs):
+            contexts.append(page.context)
+            return goto(page, *args, **kwargs)
+        try:
+            with patch.object(Page, 'goto', track):
+                self.worker_request(runtime)
+            self.assertEqual(len(contexts), 2)
+            self.assertIsNot(contexts[0], contexts[1])
+            self.assertIs(contexts[0].browser, contexts[1].browser)
+            self.assertEqual(runtime.browser.contexts, [])
+            self.assertEqual(self.server.token_calls, 1)
+        finally:
+            runtime.close()
+
+    def test_http_error_fails_promptly_with_safe_status_after_one_recovery(self):
+        self.server.statuses = [503, 503]
+        runtime = browser_worker.BrowserRuntime()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(Exception) as caught:
+                self.worker_request(runtime, deadlineSeconds=5)
+            payload = browser_worker.error_payload(caught.exception)
+            self.assertEqual(payload['code'], 'BROWSER_NAVIGATION_FAILED')
+            self.assertEqual(payload['reason'], 'HTTP_ERROR')
+            self.assertEqual(payload['httpStatus'], 503)
+            self.assertEqual(payload['attempt'], 2)
+            self.assertEqual(self.server.document_calls, 2)
+            self.assertLess(time.monotonic() - started, 4)
+            self.assertEqual(self.server.token_calls, 0)
+            self.assertNotIn('private', json.dumps(payload))
+        finally:
+            runtime.close()
+
+    def test_forbidden_and_rate_limited_documents_are_not_retried(self):
+        runtime = browser_worker.BrowserRuntime()
+        try:
+            for status in (403, 429):
+                with self.subTest(status=status):
+                    self.server.statuses = [status]
+                    before = self.server.document_calls
+                    with self.assertRaises(Exception) as caught:
+                        self.worker_request(runtime, deadlineSeconds=3)
+                    payload = browser_worker.error_payload(caught.exception)
+                    self.assertEqual(payload['code'], 'BROWSER_NAVIGATION_FAILED')
+                    self.assertEqual(payload['httpStatus'], status)
+                    self.assertEqual(payload['attempt'], 1)
+                    self.assertEqual(self.server.document_calls - before, 1)
+        finally:
+            runtime.close()
+
+    def test_missing_sdk_has_its_own_short_wait_and_no_navigation_retry(self):
+        self.server.no_sdk = True
+        runtime = browser_worker.BrowserRuntime()
+        started = time.monotonic()
+        try:
+            with patch.object(sentinel, 'SDK_READY_TIMEOUT_MS', 200, create=True):
+                with self.assertRaises(Exception) as caught:
+                    self.worker_request(runtime, deadlineSeconds=4)
+            payload = browser_worker.error_payload(caught.exception)
+            self.assertEqual(payload['code'], 'VALIDATION_TIMEOUT')
+            self.assertEqual(payload['stage'], 'browser_navigation')
+            self.assertEqual(payload['reason'], 'SDK_NOT_READY')
+            self.assertEqual(self.server.document_calls, 1)
+            self.assertLess(time.monotonic() - started, 3)
+        finally:
+            runtime.close()
+
+
 class WorkerRecoveryTest(unittest.TestCase):
     def setUp(self):
         self.runtime = Mock()
@@ -180,6 +311,67 @@ class WorkerRecoveryTest(unittest.TestCase):
                 patch.object(browser_worker, 'extract_sentinel', side_effect=self.closed) as extract:
             with self.assertRaises(browser_worker.BrowserUnavailableError):
                 self.run_request(deadlineSeconds=10)
+        self.assertEqual(extract.call_count, 1)
+
+    def test_transient_navigation_error_reuses_browser_once(self):
+        errors = [PlaywrightError('net::ERR_CONNECTION_RESET at private-url'),
+                  PlaywrightError('Page.goto: Navigation to private-url is interrupted by another navigation')]
+        for error in errors:
+            def fail_first(**kwargs):
+                kwargs['on_timing']('browser_navigation', 1, 'error')
+                raise error
+            with self.subTest(error=error), patch.object(browser_worker, 'extract_sentinel', side_effect=fail_first) as extract:
+                with self.assertRaises(PlaywrightError) as caught:
+                    self.run_request()
+                self.assertEqual(extract.call_count, 2)
+                self.assertEqual(caught.exception.attempt, 2)
+                self.assertEqual(self.runtime.close.call_count, 0)
+                self.assertNotIn('private', json.dumps(browser_worker.error_payload(caught.exception)))
+
+    def test_verification_errors_and_cleanup_failures_are_not_retried(self):
+        for stage, cleanup in [('browser_verify', False), ('browser_navigation', True)]:
+            error = PlaywrightError('net::ERR_CONNECTION_RESET')
+            if cleanup:
+                error.cleanup_code = 'BROWSER_CLEANUP_FAILED'
+            def fail(**kwargs):
+                kwargs['on_timing'](stage, 1, 'error')
+                raise error
+            with self.subTest(stage=stage), patch.object(browser_worker, 'extract_sentinel', side_effect=fail) as extract:
+                with self.assertRaises(PlaywrightError):
+                    self.run_request()
+                self.assertEqual(extract.call_count, 1)
+
+    def test_navigation_recovery_shares_deadline_and_browser_closure_attempt_limit(self):
+        error = PlaywrightError('net::ERR_CONNECTION_RESET')
+        def fail(**kwargs):
+            kwargs['on_timing']('browser_navigation', 1, 'error')
+            raise error
+        with patch.object(browser_worker.time, 'monotonic', side_effect=[0, 0, 1, 4, 4, 5]), \
+                patch.object(browser_worker, 'extract_sentinel', side_effect=fail) as extract:
+            with self.assertRaises(PlaywrightError):
+                self.run_request(deadlineSeconds=10)
+        self.assertEqual([call.kwargs['deadline_seconds'] for call in extract.call_args_list], [9, 5])
+        with patch.object(browser_worker, 'extract_sentinel', side_effect=[self.closed, error]) as extract:
+            with self.assertRaises(PlaywrightError):
+                self.run_request()
+        self.assertEqual(extract.call_count, 2)
+
+    def test_navigation_cancellation_and_exhausted_budget_do_not_retry(self):
+        error = PlaywrightError('net::ERR_CONNECTION_RESET')
+        def fail(**kwargs):
+            kwargs['on_timing']('browser_navigation', 1, 'error')
+            raise error
+        with patch.object(browser_worker.time, 'monotonic', side_effect=[0, 0, 1, 10]), \
+                patch.object(browser_worker, 'extract_sentinel', side_effect=fail) as extract:
+            with self.assertRaises(PlaywrightError):
+                self.run_request(deadlineSeconds=10)
+        self.assertEqual(extract.call_count, 1)
+        def cancel(**kwargs):
+            self.stopped.set()
+            fail(**kwargs)
+        with patch.object(browser_worker, 'extract_sentinel', side_effect=cancel) as extract:
+            with self.assertRaises(InterruptedError):
+                self.run_request()
         self.assertEqual(extract.call_count, 1)
 
     def test_public_failure_never_contains_raw_exception_data(self):

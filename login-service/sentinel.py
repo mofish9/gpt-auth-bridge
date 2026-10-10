@@ -14,10 +14,12 @@ from pathlib import Path
 from contextlib import ExitStack, contextmanager
 from urllib.parse import quote
 
-from playwright.sync_api import Error as PlaywrightError, sync_playwright
+from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 
 DEFAULT_SENTINEL_TIMEOUT = 75
+SDK_READY_TIMEOUT_MS = 15000
+NAVIGATION_TIMEOUT_MS = 30000
 CHAT_WEB_CLIENT_ID = "app_X8zY6vW2pQ9tR3dE7nK1jL5gH"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -265,6 +267,111 @@ class SentinelContextMismatch(RuntimeError):
     pass
 
 
+# Only these non-sensitive diagnostics may leave the worker. Never return URLs,
+# browser exception messages, response bodies, or proxy credentials.
+_BROWSER_NETWORK_REASONS = frozenset({
+    'ERR_ABORTED', 'ERR_CONNECTION_RESET', 'ERR_CONNECTION_CLOSED',
+    'ERR_CONNECTION_TIMED_OUT', 'ERR_TIMED_OUT', 'ERR_EMPTY_RESPONSE',
+    'ERR_NETWORK_CHANGED', 'ERR_NAME_NOT_RESOLVED', 'ERR_CONNECTION_REFUSED',
+    'ERR_PROXY_CONNECTION_FAILED', 'ERR_TUNNEL_CONNECTION_FAILED',
+    'ERR_SOCKS_CONNECTION_FAILED', 'ERR_CERT_AUTHORITY_INVALID',
+    'ERR_CERT_DATE_INVALID', 'ERR_CERT_COMMON_NAME_INVALID', 'ERR_SSL_PROTOCOL_ERROR',
+})
+_TRANSIENT_NAVIGATION_REASONS = frozenset({
+    'ERR_ABORTED', 'NAVIGATION_INTERRUPTED', 'NAVIGATION_TIMEOUT',
+    'ERR_CONNECTION_RESET', 'ERR_CONNECTION_CLOSED', 'ERR_CONNECTION_TIMED_OUT',
+    'ERR_TIMED_OUT', 'ERR_EMPTY_RESPONSE', 'ERR_NETWORK_CHANGED',
+})
+
+
+class SentinelNavigationError(RuntimeError):
+    def __init__(self, http_status):
+        super().__init__('Validation document returned an HTTP error')
+        self.reason = 'HTTP_ERROR'
+        self.http_status = http_status
+
+
+def browser_failure_details(error):
+    reason = getattr(error, 'reason', None)
+    details = {}
+    if reason in ('HTTP_ERROR', 'SDK_NOT_READY'):
+        details['reason'] = reason
+        status = getattr(error, 'http_status', None)
+        if reason == 'HTTP_ERROR' and type(status) is int and 400 <= status <= 599:
+            details['httpStatus'] = status
+    elif isinstance(error, PlaywrightError):
+        message = str(error)
+        match = re.search(r'net::(ERR_[A-Z_]+)\b', message)
+        if match and match.group(1) in _BROWSER_NETWORK_REASONS:
+            details['reason'] = match.group(1)
+        elif 'interrupted by another navigation' in message:
+            details['reason'] = 'NAVIGATION_INTERRUPTED'
+        elif isinstance(error, PlaywrightTimeoutError) and getattr(error, 'stage', None) == 'browser_navigation':
+            details['reason'] = 'NAVIGATION_TIMEOUT'
+    return details
+
+
+def is_transient_navigation_error(error):
+    details = browser_failure_details(error)
+    return (details.get('reason') in _TRANSIENT_NAVIGATION_REASONS
+            or details.get('httpStatus') in (502, 503, 504))
+
+
+def _navigate_sentinel_page(page, authorize_url, remaining_ms):
+    # A document commit is sufficient: wait for the SDK itself, not unrelated
+    # images/scripts or DOMContentLoaded. Observe redirected documents as well.
+    document_status = None
+
+    def response_received(response):
+        nonlocal document_status
+        if response.request.is_navigation_request() and response.frame == page.main_frame:
+            document_status = response.status
+
+    def check_document():
+        if document_status is not None and document_status >= 400:
+            raise SentinelNavigationError(document_status)
+
+    page.on('response', response_received)
+    try:
+        interrupted = None
+        try:
+            response = page.goto(authorize_url, wait_until='commit', timeout=remaining_ms(NAVIGATION_TIMEOUT_MS))
+            if response is not None:
+                document_status = response.status
+        except PlaywrightError as error:
+            if browser_failure_details(error).get('reason') not in ('ERR_ABORTED', 'NAVIGATION_INTERRUPTED'):
+                raise
+            # Redirects may interrupt goto after a usable document has arrived.
+            # Give that document a short chance before the worker's one recovery.
+            interrupted = error
+        check_document()
+        ready_deadline = time.monotonic() + min(SDK_READY_TIMEOUT_MS, 3000 if interrupted else SDK_READY_TIMEOUT_MS) / 1000
+        while True:
+            remaining = remaining_ms()  # cancellation and the shared budget
+            check_document()
+            ready_remaining = int((ready_deadline - time.monotonic()) * 1000)
+            if ready_remaining <= 0:
+                if interrupted:
+                    raise interrupted
+                error = TimeoutError('Validation SDK did not become ready')
+                error.reason = 'SDK_NOT_READY'
+                raise error
+            try:
+                handle = page.wait_for_function(
+                    "typeof window.SentinelSDK?.token === 'function' && typeof window.SentinelSDK?.init === 'function'",
+                    polling=100, timeout=min(1000, remaining, ready_remaining))
+                handle.dispose()
+                check_document()
+                remaining_ms()
+                return
+            except PlaywrightTimeoutError:
+                # Short slices allow cancellation; the SDK becoming ready wakes
+                # immediately without a fixed sleep or Python-side polling.
+                continue
+    finally:
+        page.remove_listener('response', response_received)
+
+
 def _find_chrome(playwright=None) -> str | None:
     global _CHROME_CACHE
     if _CHROME_CACHE and Path(_CHROME_CACHE).exists():
@@ -448,19 +555,7 @@ def extract_sentinel(
                     + ('' if strict_login else '&screen_hint=signup')
                 )
                 with _timed_stage('browser_navigation', on_timing):
-                    page.goto(authorize_url, wait_until="domcontentloaded", timeout=remaining_ms(90000))
-                    while time.monotonic() < deadline and not _stopped(stop_event):
-                        try:
-                            if page.evaluate("typeof window.SentinelSDK !== 'undefined'"):
-                                break
-                        except Exception as error:
-                            if is_browser_closed_error(error):
-                                raise
-                        time.sleep(min(0.5, remaining_ms() / 1000))
-                    if _stopped(stop_event):
-                        return None
-                    if not page.evaluate("typeof window.SentinelSDK !== 'undefined'"):
-                        raise TimeoutError("等待 SentinelSDK 超时")
+                    _navigate_sentinel_page(page, authorize_url, remaining_ms)
                 token_js = """
                     ({did, timeoutMs}) => Promise.race([
                         SentinelSDK.token().then(raw => {

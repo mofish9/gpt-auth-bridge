@@ -7,7 +7,7 @@ import { once } from 'node:events';
 import { YesCaptchaSolver } from './yescaptcha.js';
 import { createOpenAISentinelTokenFetcher, solveTurnstileViaBrowserSentinel } from './openai-sentinel.js';
 import { validationError, decodeBrowserFailure, validationFailureFields } from './validation-error.js';
-import { validationFailureHint } from '../../docs/validation-failure.js';
+import { validationFailureHint, validationFailureLabel } from '../../docs/validation-failure.js';
 import { classifyAuthFailure, retryPolicyForFailure } from '../src/lib/auth-failure-classifier.js';
 import { runProtocolLoginPipelineAccount } from '../src/services/protocol-login-pipeline.js';
 import { operationErrorPayload } from '../src/http/operation-error.js';
@@ -226,4 +226,31 @@ test('queue cancellation never starts a second worker and execution receives rem
     await pool.run({ deadlineSeconds: 75 }, { remainingMs: () => 500 });
     assert.equal(started, 2);
   } finally { unblock?.({}); await pool.close(); }
+});
+
+
+test('navigation diagnostics survive JSON and SSE with only allowlisted details', async () => {
+  const failure = decodeBrowserFailure({ code: 'BROWSER_NAVIGATION_FAILED', stage: 'browser_navigation',
+    attempt: 2, reason: 'HTTP_ERROR', httpStatus: 503, url: 'private-url', message: 'private-response' });
+  const result = await runProtocolLoginPipelineAccount(account, { workspaceMode: 'session',
+    runSessionLogin: async () => { throw failure; } });
+  const frames = [];
+  const res = new EventEmitter();
+  res.write = frame => { frames.push(frame); return true; };
+  new SSEChannel(res).send('account_done', result);
+  const publicResult = JSON.parse(frames.at(-1).split('\ndata: ')[1]);
+  assert.deepEqual(publicResult.validationFailure, result.validationFailure);
+  assert.doesNotMatch(frames.join(''), /private-url|private-response/);
+  assert.equal(result.validationFailure.reason, 'HTTP_ERROR');
+  assert.equal(result.validationFailure.httpStatus, 503);
+  assert.match(validationFailureHint(result), /HTTP 503/);
+  assert.equal(validationFailureLabel(result), '辅助验证失败');
+  assert.doesNotMatch(JSON.stringify(result), /private-url|private-response/);
+  const stripped = validationFailureFields({ code: failure.code, reason: 'private-reason', httpStatus: '503' });
+  assert.equal(stripped.validationFailure.reason, undefined);
+  assert.equal(stripped.validationFailure.httpStatus, undefined);
+  assert.equal(validationFailureLabel({ code: 'VALIDATION_TIMEOUT' }), '辅助验证超时');
+  assert.equal(validationFailureLabel({ code: 'VALIDATION_CANCELLED' }), '辅助验证已取消');
+  assert.equal(validationFailureLabel({ code: 'wrong-password' }), '');
+  assert.match(validationFailureHint({ code: 'VALIDATION_TIMEOUT', reason: 'SDK_NOT_READY' }), /SDK/);
 });

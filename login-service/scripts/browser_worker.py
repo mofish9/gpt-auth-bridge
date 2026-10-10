@@ -9,7 +9,8 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from sentinel import _find_chrome, extract_sentinel, _timed_stage, is_browser_closed_error, SentinelContextMismatch
+from sentinel import (_find_chrome, extract_sentinel, _timed_stage, is_browser_closed_error,
+                      SentinelContextMismatch, browser_failure_details, is_transient_navigation_error)
 
 
 def emit(value):
@@ -78,13 +79,14 @@ def error_payload(error):
     else:
         code = 'VALIDATION_CHALLENGE_FAILED'
     result = {'code': code, 'stage': stage, 'attempt': getattr(error, 'attempt', 1), 'retryable': False}
+    result.update(browser_failure_details(error))
     if getattr(error, 'cleanup_code', None):
         result['cleanupCode'] = 'BROWSER_CLEANUP_FAILED'
     return result
 
 
 def run_request(runtime, request, stopped, on_timing, on_event=None):
-    """Recover one lost browser, within the original task's time budget."""
+    """Recover once from a lost browser or transient document navigation."""
     deadline = time.monotonic() + max(0, float(request.get('deadlineSeconds', 75)))
     failed_stage = 'browser_start'
     saw_failure = False
@@ -135,7 +137,16 @@ def run_request(runtime, request, stopped, on_timing, on_event=None):
             if stopped.is_set():
                 raise InterruptedError('Browser task cancelled') from error
             if not is_browser_closed_error(error):
-                raise
+                if (failed_stage != 'browser_navigation' or not is_transient_navigation_error(error)
+                        or getattr(error, 'cleanup_code', None) or attempt == 2
+                        or deadline - time.monotonic() < 1):
+                    raise
+                # extract_sentinel has closed the failed context. Keep the healthy
+                # browser process, and share the same two-attempt recovery limit.
+                observe('recovery_started')
+                if stopped.wait(0.2):
+                    raise InterruptedError('Browser task cancelled') from error
+                continue
             # Do not include Chrome launch logs, URLs, cookies, or proxy credentials.
             connected = bool(runtime.browser and runtime.browser.is_connected())
             detail = (f'stage={failed_stage}; attempt={attempt}/2; '

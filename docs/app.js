@@ -1,5 +1,5 @@
 import { splitPasswordTotpLine } from './login-account-format.js';
-import { validationFailureHint } from './validation-failure.js';
+import { validationFailureHint, validationFailureFields, validationFailureLabel } from './validation-failure.js';
 import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent } from './operation-contract.js';
 
 (async () => {
@@ -2263,7 +2263,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       }
       if (full) elements.loginProgressList.append(node.article);
       const stage = LOGIN_STAGES[Math.min(record.stage, LOGIN_STAGES.length - 1)];
-      const label = record.status === "waiting" ? "等待开始" : (record.status === "success" ? "已完成" : (record.status === "error" ? `${stage}失败` : stage));
+      const label = record.status === "waiting" ? "等待开始" : (record.status === "success" ? "已完成" : (record.status === "error" ? (validationFailureLabel(record) || `${stage}失败`) : stage));
       const progress = record.status === "success" ? 100 : Math.max(5, Math.round(((record.stage + 1) / LOGIN_STAGES.length) * 100));
       const log = record.logs.length
         ? record.logs.map((item) => `[${item.time}] ${item.level === "error" ? "失败 · " : (/^warn/.test(item.level) ? "注意 · " : "")}${item.message}`).join("\n")
@@ -2892,6 +2892,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
             const onEvent = (name, data) => {
               const record = ensureLoginProgressRecord(data, accounts.findIndex(account => String(account.id) === String(data?.id)));
               if (data.terminalReason) markMonitorStopped(data.id, data.terminalReason);
+              if (record && name === 'account_done') record.validationFailure = validationFailureFields(data).validationFailure;
               if (record && data.terminalReason) record.terminalReason = data.terminalReason;
               if (record && data.error) record.error = sanitizeLoginLog(data.error);
               if (name === 'account_start') appendLoginProgress(record, '定时测活发现失效，开始协议重登', { stage: 0, status: 'running' });
@@ -3535,6 +3536,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
             status: "running", level: data.level, time: data.time,
           });
         } else if (name === "account_done") {
+          if (record) record.validationFailure = validationFailureFields(data).validationFailure;
           if (record && data.terminalReason) record.terminalReason = data.terminalReason;
           if (record && data.error) record.error = sanitizeLoginLog(data.error);
           if (data.ok) {

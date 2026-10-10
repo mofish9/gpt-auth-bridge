@@ -61,15 +61,34 @@ def check_incremental_progress(browser, url):
                 && rows[150].querySelector('details').open && rows[150].querySelector('pre').scrollTop === 0;
         }''')
         page.evaluate('''() => {
+            sendProgress('account_log', {email: 'fixture-151@example.com', msg: '提交账号密码'});
+            sendProgress('account_done', {email: 'fixture-151@example.com', ok: false, error: 'fixture-error',
+                validationFailure: {code: 'BROWSER_NAVIGATION_FAILED', stage: 'browser_navigation',
+                    attempt: 2, reason: 'HTTP_ERROR', httpStatus: 503}});
+            sendProgress('account_log', {email: 'fixture-152@example.com', msg: '提交 2FA 验证码'});
+            sendProgress('account_done', {email: 'fixture-152@example.com', ok: false, error: 'fixture-error',
+                validationFailure: {code: 'VALIDATION_TIMEOUT', stage: 'browser_navigation', reason: 'SDK_NOT_READY'}});
+            sendProgress('account_log', {email: 'fixture-153@example.com', msg: '提交账号密码'});
+            sendProgress('account_done', {email: 'fixture-153@example.com', ok: false, error: '密码不正确'});
             sendProgress('account_done', {email: 'fixture-150@example.com', ok: true, businessSuccess: 0,
                 timings: {total: {durationMs: 2500, calls: 1}}});
             sendProgress('summary', {ok: true, success: 1, failed: 0, results: [], accounts: []});
             fixtureStream.close();
         }''')
         expect(target.locator('.login-account-stage')).to_have_text('已完成')
+        expect(page.locator('.login-account-progress').nth(151).locator('.login-account-stage')).to_have_text('辅助验证失败')
+        expect(page.locator('.login-account-progress').nth(151).locator('.login-account-log')).to_contain_text('HTTP 503')
+        expect(page.locator('.login-account-progress').nth(152).locator('.login-account-stage')).to_have_text('辅助验证超时')
+        expect(page.locator('.login-account-progress').nth(152).locator('.login-account-log')).to_contain_text('验证 SDK 未就绪')
+        expect(page.locator('.login-account-progress').nth(153).locator('.login-account-stage')).to_have_text('输入密码失败')
         page.wait_for_function("async () => (await browserWorkspace.read())?.state?.loginProgress?.[150]?.[1]?.timings?.total?.durationMs === 2500")
         page.reload()
         expect(page.locator('.login-account-progress')).to_have_count(200)
+        expect(page.locator('.login-account-progress').nth(151).locator('.login-account-stage')).to_have_text('辅助验证失败')
+        expect(page.locator('.login-account-progress').nth(151).locator('.login-account-log')).to_contain_text('HTTP 503')
+        expect(page.locator('.login-account-progress').nth(152).locator('.login-account-stage')).to_have_text('辅助验证超时')
+        expect(page.locator('.login-account-progress').nth(152).locator('.login-account-log')).to_contain_text('验证 SDK 未就绪')
+        expect(page.locator('.login-account-progress').nth(153).locator('.login-account-stage')).to_have_text('输入密码失败')
         page.locator('.login-account-progress').nth(150).locator('summary').click()
         expect(page.locator('.login-account-progress').nth(150).locator('.login-account-timing div')).to_contain_text('账号执行 2.50s')
         page.once("dialog", lambda dialog: dialog.accept())

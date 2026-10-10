@@ -17,11 +17,22 @@ export const VALIDATION_FAILURES = Object.freeze({
 const stages = new Set(['sentinel', 'requirements', 'provider', 'browser_queue', 'browser_start',
   'browser_context', 'browser_navigation', 'browser_verify', 'browser_cleanup']);
 
+const reasons = new Set(['HTTP_ERROR', 'SDK_NOT_READY', 'NAVIGATION_TIMEOUT', 'NAVIGATION_INTERRUPTED',
+  'ERR_ABORTED', 'ERR_CONNECTION_RESET', 'ERR_CONNECTION_CLOSED', 'ERR_CONNECTION_TIMED_OUT',
+  'ERR_TIMED_OUT', 'ERR_EMPTY_RESPONSE', 'ERR_NETWORK_CHANGED', 'ERR_NAME_NOT_RESOLVED',
+  'ERR_CONNECTION_REFUSED', 'ERR_PROXY_CONNECTION_FAILED', 'ERR_TUNNEL_CONNECTION_FAILED',
+  'ERR_SOCKS_CONNECTION_FAILED', 'ERR_CERT_AUTHORITY_INVALID', 'ERR_CERT_DATE_INVALID',
+  'ERR_CERT_COMMON_NAME_INVALID', 'ERR_SSL_PROTOCOL_ERROR']);
+
 export function validationFailureFields(input) {
   const source = input?.validationFailure || input;
   if (!source || !Object.hasOwn(VALIDATION_FAILURES, source.code)) return {};
   const failure = { code: source.code, retryable: false };
   if (stages.has(source.stage)) failure.stage = source.stage;
+  if (reasons.has(source.reason)) failure.reason = source.reason;
+  if (failure.reason === 'HTTP_ERROR' && Number.isInteger(source.httpStatus) && source.httpStatus >= 400 && source.httpStatus <= 599) {
+    failure.httpStatus = source.httpStatus;
+  }
   if (Number.isInteger(source.attempt) && source.attempt >= 1 && source.attempt <= 2) failure.attempt = source.attempt;
   for (const key of ['causeCode', 'cleanupCode']) {
     if (Object.hasOwn(VALIDATION_FAILURES, source[key])) failure[key] = source[key];
@@ -30,5 +41,19 @@ export function validationFailureFields(input) {
 }
 
 export function validationFailureHint(input) {
-  return VALIDATION_FAILURES[validationFailureFields(input).validationFailure?.code] || '';
+  const failure = validationFailureFields(input).validationFailure;
+  if (!failure) return '';
+  const detail = failure.httpStatus ? `HTTP ${failure.httpStatus}`
+    : failure.reason === 'SDK_NOT_READY' ? '验证 SDK 未就绪'
+      : failure.reason === 'NAVIGATION_TIMEOUT' ? '页面加载超时'
+        : failure.reason === 'NAVIGATION_INTERRUPTED' ? '页面跳转中断' : failure.reason;
+  return VALIDATION_FAILURES[failure.code] + (detail ? `（${detail}）` : '');
+}
+
+export function validationFailureLabel(input) {
+  const failure = validationFailureFields(input).validationFailure;
+  if (!failure) return '';
+  if (failure.code === 'VALIDATION_TIMEOUT') return '辅助验证超时';
+  if (failure.code === 'VALIDATION_CANCELLED') return '辅助验证已取消';
+  return '辅助验证失败';
 }
