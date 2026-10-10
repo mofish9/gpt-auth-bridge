@@ -347,7 +347,7 @@ def _navigate_sentinel_page(page, authorize_url, remaining_ms):
         check_document()
         ready_deadline = time.monotonic() + min(SDK_READY_TIMEOUT_MS, 3000 if interrupted else SDK_READY_TIMEOUT_MS) / 1000
         while True:
-            remaining = remaining_ms()  # cancellation and the shared budget
+            remaining_ms()  # cancellation and the shared budget
             check_document()
             ready_remaining = int((ready_deadline - time.monotonic()) * 1000)
             if ready_remaining <= 0:
@@ -357,17 +357,21 @@ def _navigate_sentinel_page(page, authorize_url, remaining_ms):
                 error.reason = 'SDK_NOT_READY'
                 raise error
             try:
-                handle = page.wait_for_function(
-                    "typeof window.SentinelSDK?.token === 'function' && typeof window.SentinelSDK?.init === 'function'",
-                    polling=100, timeout=min(1000, remaining, ready_remaining))
-                handle.dispose()
+                # wait_for_function re-evaluates its predicate with eval, which
+                # strict login-page CSP blocks. Evaluate the function directly.
+                ready = page.evaluate(
+                    "() => typeof window.SentinelSDK?.token === 'function' && typeof window.SentinelSDK?.init === 'function'")
+            except PlaywrightError as error:
+                if 'Execution context was destroyed' not in str(error):
+                    raise
+                # A redirect can replace the document between readiness checks.
+                ready = False
+            if ready:
                 check_document()
                 remaining_ms()
                 return
-            except PlaywrightTimeoutError:
-                # Short slices allow cancellation; the SDK becoming ready wakes
-                # immediately without a fixed sleep or Python-side polling.
-                continue
+            ready_remaining = max(0, int((ready_deadline - time.monotonic()) * 1000))
+            page.wait_for_timeout(min(100, remaining_ms(), ready_remaining))
     finally:
         page.remove_listener('response', response_received)
 

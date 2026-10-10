@@ -48,7 +48,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            body = b'''<!doctype html><script>
+            body = b'''<!doctype html><script nonce="fixture-sdk">
+              const installSDK = () => {
               window.SentinelSDK = {init() {}, async token(flow) {
                 const response = await fetch('/token');
                 if (!response.ok) throw new Error('Unused registration token failed');
@@ -60,10 +61,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 }
                 return JSON.stringify(payload);
               }};
-            </script>'''
+              };
+            '''
+            if self.server.sdk_delay_ms:
+                body += b'setTimeout(installSDK, ' + str(self.server.sdk_delay_ms).encode() + b');'
+            else:
+                body += b'installSDK();'
+            body += b'</script>'
         if self.server.block_asset and self.path.startswith('/api/accounts/authorize'):
             body += b'<script src="/slow-script"></script>'
         self.send_response(200)
+        if self.server.strict_csp:
+            self.send_header('Content-Security-Policy', "script-src 'nonce-fixture-sdk'; connect-src 'self'")
         self.send_header('Content-Type', 'text/html' if self.path != '/token' else 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -83,6 +92,8 @@ class SentinelRuntimeTest(unittest.TestCase):
         self.server.document_calls = 0
         self.server.no_sdk = False
         self.server.block_asset = False
+        self.server.strict_csp = False
+        self.server.sdk_delay_ms = 0
         self.server.asset_released = threading.Event()
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -180,6 +191,65 @@ class SentinelRuntimeTest(unittest.TestCase):
         self.assertEqual(json.loads(result['sentinel_token'])['id'], 'fixture-device')
         self.assertLess(time.monotonic() - started, 4)
         self.assertFalse(self.server.asset_released.is_set())
+
+    def test_login_sdk_ready_under_strict_csp(self):
+        self.server.strict_csp = True
+        result = self.extract(device_id='fixture-device', auth_flow='password_verify', include_so_token=False)
+        token = json.loads(result['sentinel_token'])
+        self.assertEqual(token['id'], 'fixture-device')
+        self.assertEqual(token['flow'], 'password_verify')
+        self.assertEqual(self.server.token_calls, 1)
+
+    def test_delayed_login_sdk_ready_under_strict_csp(self):
+        self.server.strict_csp = True
+        self.server.sdk_delay_ms = 350
+        result = self.extract(device_id='fixture-device', auth_flow='password_verify', include_so_token=False)
+        token = json.loads(result['sentinel_token'])
+        self.assertEqual(token['id'], 'fixture-device')
+        self.assertEqual(token['flow'], 'password_verify')
+        self.assertEqual(self.server.token_calls, 1)
+
+    def test_delayed_sdk_wait_survives_document_redirect_under_strict_csp(self):
+        self.server.strict_csp = True
+        self.server.sdk_delay_ms = 350
+        goto = Page.goto
+
+        def redirect_after_commit(page, *args, **kwargs):
+            response = goto(page, *args, **kwargs)
+            page.evaluate("setTimeout(() => location.replace('/sdk-redirected'), 50)")
+            return response
+
+        with patch.object(Page, 'goto', redirect_after_commit):
+            result = self.extract(device_id='fixture-device', auth_flow='password_verify', include_so_token=False)
+        self.assertEqual(json.loads(result['sentinel_token'])['id'], 'fixture-device')
+        self.assertEqual(self.server.document_calls, 2)
+        self.assertEqual(self.server.token_calls, 1)
+
+    def test_delayed_sdk_wait_can_be_cancelled_under_strict_csp(self):
+        self.server.strict_csp = True
+        self.server.sdk_delay_ms = 5000
+        stopped = threading.Event()
+        timers = []
+        goto = Page.goto
+
+        def cancel_after_commit(page, *args, **kwargs):
+            response = goto(page, *args, **kwargs)
+            timer = threading.Timer(0.1, stopped.set)
+            timers.append(timer)
+            timer.start()
+            return response
+
+        started = time.monotonic()
+        try:
+            with patch.object(Page, 'goto', cancel_after_commit), self.assertRaises(InterruptedError):
+                self.extract(device_id='fixture-device', auth_flow='password_verify',
+                             include_so_token=False, stop_event=stopped)
+            self.assertEqual(self.server.token_calls, 0)
+            self.assertLess(time.monotonic() - started, 3)
+        finally:
+            for timer in timers:
+                timer.cancel()
+                timer.join()
 
     def test_aborted_navigation_can_use_already_ready_document(self):
         goto = Page.goto
