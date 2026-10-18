@@ -87,8 +87,11 @@ export function browserRequestMiddleware({ settings, createPushService, strictRo
         settings: structuredClone(context.clientSettings),
       });
       const json = res.json.bind(res);
+      // Lease coordination never changes browser accounts/settings. Avoid
+      // cloning and returning a full workspace for every heartbeat.
+      const includeSnapshot = req.path !== '/api/v2/accounts/monitor-lease';
       res.json = (payload) => res.writableEnded || res.destroyed ? res
-        : json({ ...payload, browserState: res.locals.browserSnapshot?.() });
+        : json(includeSnapshot ? { ...payload, browserState: res.locals.browserSnapshot?.() } : payload);
       return requests.run(context, next);
     } catch (error) {
       await dispose();

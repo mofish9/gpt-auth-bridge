@@ -45,6 +45,11 @@ test('concurrent browsers with identical account IDs stay isolated; completion a
       sse.send('summary', { ok: true });
     });
   });
+  app.post('/api/v2/accounts/monitor-lease', (_req, res) => {
+    // Fail if the response path constructs a workspace that the caller ignores.
+    res.locals.browserSnapshot = () => assert.fail('lease responses must not clone accounts');
+    res.json({ ok: true, results: [{ id: 'same-id', owned: true }] });
+  });
   let disconnectReleased;
   const disconnected = new Promise(resolve => { disconnectReleased = resolve; });
   app.post('/api/v2/disconnect', async (_req, res) => {
@@ -69,6 +74,8 @@ test('concurrent browsers with identical account IDs stay isolated; completion a
     assert.ok(bodies.every(body => body.browserState.accounts[0].status === 'done'));
     assert.doesNotMatch(JSON.stringify(bodies), /operator-private-key/);
     assert.equal(released, 2);
+    const lease = await send('accounts/monitor-lease', 'fixture-lease');
+    assert.deepEqual(await lease.json(), { ok: true, results: [{ id: 'same-id', owned: true }] });
     const stream = await send('stream', 'fixture-SSE');
     const text = await stream.text();
     assert.equal((text.match(/event: browser_state/g) || []).length, 1);

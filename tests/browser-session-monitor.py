@@ -27,7 +27,7 @@ def check_session_monitor(browser, url):
             calls.append((path, body))
             snapshot = body.get('browserState')
             if path.endswith('/session-probe'):
-                assert body['proxyMode'] == 'builtin'
+                assert body['proxyMode'] == 'direct'
                 assert 'fixture-key' not in json.dumps(snapshot)
                 results = [{'id': account['id'], 'sessionInvalid': bool(account.get('session_access_token')) and account['id'] == 'web',
                             'health': ('alive' if healthy[0] and account['id'] in ['invalid', 'free', 'web'] else
@@ -38,7 +38,7 @@ def check_session_monitor(browser, url):
                     return
                 route.fulfill(json={'ok': True, 'results': results, 'browserState': snapshot})
             elif path.endswith('/protocol-login-pipeline'):
-                assert body['proxyMode'] == 'builtin'
+                assert body['proxyMode'] == 'direct'
                 assert body['workspaceMode'] == 'all'
                 results = []
                 for account in snapshot['accounts']:
@@ -91,7 +91,7 @@ def check_session_monitor(browser, url):
             page.evaluate('''async ({accounts, target}) => {
                 await browserWorkspace.save({state: {browserAccounts: accounts,
                     browserSettings: {sub2apiSettings: {baseUrl: 'https://sub2.fixture', adminApiKey: 'fixture-key', groupIds:[7]}},
-                    cpaSettings: {baseUrl: 'https://cpa.fixture', managementKey: 'fixture-key'}, loginProxyMode:'builtin'},
+                    cpaSettings: {baseUrl: 'https://cpa.fixture', managementKey: 'fixture-key'}, loginProxyMode:'direct'},
                     fields: [{name:'push-target', value:target, type:'radio', checked:true}]});
             }''', {'accounts': accounts, 'target': target})
             page.reload()

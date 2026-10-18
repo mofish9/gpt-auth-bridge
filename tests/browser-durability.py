@@ -227,12 +227,54 @@ def check_history_compaction(browser):
         context.close()
 
 
+def check_slow_save_coalescing(browser):
+    context, page, errors, _ = fixture_page(browser)
+    try:
+        page.locator('.top-nav [data-format="protocol-login"]').click()
+        page.wait_for_timeout(400)
+        page.evaluate('''() => {
+            window.snapshotCount = 0;
+            const serialize = workspaceSchema.serialize;
+            window.workspaceSchema = {...workspaceSchema, serialize(value) {
+                snapshotCount++;
+                return serialize(value);
+            }};
+            const save = browserWorkspace.save.bind(browserWorkspace);
+            let first = true;
+            browserWorkspace.save = async (...args) => {
+                const writing = save(...args);
+                if (first) {
+                    first = false;
+                    await new Promise(resolve => { window.releaseSlowSave = resolve; });
+                }
+                return writing;
+            };
+        }''')
+        field = page.locator('#login-accounts')
+        field.fill('first@example.com----password----JBSWY3DPEHPK3PXP')
+        page.wait_for_function('() => !!window.releaseSlowSave')
+        for name in ['superseded', 'latest']:
+            field.fill(name + '@example.com----password----JBSWY3DPEHPK3PXP')
+            page.wait_for_timeout(350)
+        assert page.evaluate('snapshotCount') == 1
+        page.evaluate('releaseSlowSave()')
+        page.wait_for_function('() => snapshotCount === 2')
+        saved = page.evaluate('() => browserWorkspace.read()')
+        assert next(field['value'] for field in saved['fields'] if field['id'] == 'login-accounts').startswith('latest@')
+        page.reload()
+        expect(page.locator('#login-accounts')).to_have_value('latest@example.com----password----JBSWY3DPEHPK3PXP')
+        assert not errors, errors
+    finally:
+        context.close()
+
+
 def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         check_recovery_and_reconcile(browser)
         check_superseded_health_and_stream_cleanup(browser)
         check_history_compaction(browser)
+        check_slow_save_coalescing(browser)
         browser.close()
     print('Browser durability: normalized refresh, write-before-send, unknown recovery, read-only reconcile, explicit retry, cancellation: PASS')
 

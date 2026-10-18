@@ -95,6 +95,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   let browserStorageAvailable = false;
   let browserStorageCleared = false;
   let browserSaveTimer;
+  let browserSaveInFlight = null;
   let workspaceGeneration = 0;
   let clearingBrowserData = false;
   function workspaceTaskIsCurrent(signal) {
@@ -167,11 +168,20 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     clearTimeout(browserSaveTimer);
     const isCurrent = workspaceTaskIsCurrent();
     const save = () => {
+      browserSaveTimer = null;
       if (!isCurrent()) return;
+      // Wait before building another full snapshot. Required saves bypass this
+      // gate and keep their exact position in the store's commit queue.
+      if (immediate !== true && !required && browserSaveInFlight) {
+        const active = browserSaveInFlight;
+        return active.then(() => {
+          if (isCurrent() && !browserSaveTimer) persistBrowserWorkspace();
+        });
+      }
       const fields = browserFields();
       const snapshot = workspaceSchema.serialize({ state: { ...state, loginProgress: [...state.loginProgress] }, fields,
         resetCredentials: elements.loginResetCredentials.textContent });
-      return window.browserWorkspace.save(snapshot, { barrier: required }).then(() => {
+      const pending = window.browserWorkspace.save(snapshot, { barrier: required }).then(() => {
           if (isCurrent()) {
             document.querySelector('#browser-storage-status').textContent = '数据仅保存在此浏览器';
             scheduleSessionMonitor();
@@ -181,6 +191,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
           document.querySelector('#browser-storage-status').textContent = error.code === 'WORKSPACE_CONFLICT' ? error.message : '浏览器保存失败，请及时下载结果';
           if (required) throw error;
         });
+      if (required) return pending;
+      browserSaveInFlight = pending;
+      return pending.finally(() => {
+        if (browserSaveInFlight === pending) browserSaveInFlight = null;
+      });
     };
     if (immediate === true || required) return save();
     else browserSaveTimer = setTimeout(save, 250);
@@ -1982,8 +1997,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   function loginProgressRecord(data = {}) {
     const id = String(data.id || data.accountId || "").trim();
     const email = String(data.email || "").trim().toLowerCase();
+    const byEmail = email && state.loginProgress.get(email);
+    if (byEmail) return byEmail;
+    if (!id) return null;
     for (const record of state.loginProgress.values()) {
-      if ((id && record.id === id) || (email && record.email.toLowerCase() === email)) return record;
+      if (record.id === id) return record;
     }
     return null;
   }
@@ -2234,7 +2252,8 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         if (!keys.has(key)) { node.article.remove(); loginProgressNodes.delete(key); }
       }
     }
-    const displayRecords = full ? [...records].sort((left, right) => left.order - right.order) : records;
+    const displayRecords = full ? [...records].sort((left, right) => left.order - right.order)
+      : [...dirtyLoginRecords].map(key => state.loginProgress.get(key)).filter(Boolean);
     for (const record of displayRecords) {
       const key = record.email.toLowerCase();
       let node = loginProgressNodes.get(key);
@@ -2717,7 +2736,12 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     const response = await fetch('/api/v2/accounts/monitor-lease', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
       body: JSON.stringify({ ids: accounts.map(account => String(account.id)), monitorOwner: owner, action,
-        browserState: { accounts: action === 'release' ? accounts.map(({ id, email }) => ({ id, email })) : accounts, settings: {} } }),
+        browserState: { accounts: accounts.map(account => ({ id: account.id, email: account.email,
+          ...(action === 'release' ? {} : {
+            password: account.openai_password || account.password || '',
+            two_factor_secret: account.two_factor_secret || account.twoFactorSecret || '',
+          }),
+        })), settings: {} } }),
     });
     const payload = await response.json();
     signal?.throwIfAborted();
