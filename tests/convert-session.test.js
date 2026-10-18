@@ -63,6 +63,7 @@ function loadPageScript(options = {}) {
   const htmlPath = path.join(__dirname, "..", "docs", "index.html");
   const html = fs.readFileSync(htmlPath, "utf8");
   const script = fs.readFileSync(path.join(__dirname, "..", "docs", "app.js"), "utf8");
+  const teamCheckoutScript = fs.readFileSync(path.join(__dirname, "..", "docs", "team-checkout.js"), "utf8").replace(/^export /gm, '');
 
   assert.match(html, /src="\/app.js"/);
 
@@ -120,7 +121,7 @@ function loadPageScript(options = {}) {
     setTimeout,
   };
 
-  vm.runInNewContext(script.replace(/^import .+;\r?\n/gm, ''), context, { filename: "docs/app.js" });
+  vm.runInNewContext(teamCheckoutScript + '\n' + script.replace(/^import .+;\r?\n/gm, ''), context, { filename: "docs/app.js" });
 
   return { elements, formatButtons };
 }

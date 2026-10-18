@@ -61,7 +61,7 @@ test('one entrypoint serves the UI, canonical/legacy APIs, SSE and browser-owned
     assert.equal((await fetch(`${app.url}/login`)).status, 404);
     assert.equal((await fetch(`${app.url}/auth.html`)).status, 404);
     assert.equal((await fetch(`${app.url}/portal.css`)).status, 404);
-    for (const asset of ['app.js', 'app.css', 'browser-store.js', 'login-account-format.js', 'validation-failure.js']) {
+    for (const asset of ['app.js', 'app.css', 'browser-store.js', 'login-account-format.js', 'validation-failure.js', 'team-checkout.js']) {
       assert.equal((await fetch(`${app.url}/${asset}`)).status, 200);
     }
     const metrics = await (await fetch(`${app.url}/api/system/metrics`)).json();

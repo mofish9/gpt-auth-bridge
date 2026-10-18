@@ -1,4 +1,5 @@
 import { splitPasswordTotpLine } from './login-account-format.js';
+import { initializeTeamCheckout } from './team-checkout.js';
 import { validationFailureHint, validationFailureFields, validationFailureLabel } from './validation-failure.js';
 import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent } from './operation-contract.js';
 
@@ -22,6 +23,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     codexmanager: "Codex-Manager",
     "sub2api-tools": "sub2api 工具",
     "protocol-login": "协议登录 / RT",
+    "team-checkout": "生成Team长链接",
   };
 
   const createWorkspaceState = () => ({
@@ -131,14 +133,14 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
   function browserFields() {
     return [...document.querySelectorAll('input, textarea, select')]
-      .filter(node => node.type !== 'file' && !node.readOnly && (node.id || node.name))
+      .filter(node => node.type !== 'file' && !node.readOnly && !node.hasAttribute('data-private') && (node.id || node.name))
       .map(node => ({ id: node.id, name: node.name, type: node.type, value: node.value, checked: node.checked }));
   }
   function restoreBrowserFields(fields = []) {
     for (const field of fields) {
       const node = field.id ? document.getElementById(field.id)
         : [...document.querySelectorAll('input[type="radio"]')].find(node => node.name === field.name && node.value === field.value);
-      if (!node || node.type === 'file' || field.id === 'login-concurrency') continue;
+      if (!node || node.type === 'file' || node.hasAttribute('data-private') || field.id === 'login-concurrency') continue;
       node.value = field.value;
       if (typeof field.checked === 'boolean') node.checked = field.checked;
     }
@@ -3837,12 +3839,19 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     elements.formatButtons.forEach((item) => {
       const isConverterGroup = item.dataset.formatGroup === "converter"
         && state.format !== "sub2api-tools"
-        && state.format !== "protocol-login";
+        && state.format !== "protocol-login"
+        && state.format !== "team-checkout";
       item.setAttribute("aria-pressed", String(item.dataset.format === state.format || isConverterGroup));
     });
     updatePushControls();
     const isTool = state.format === "sub2api-tools";
     const isLogin = state.format === "protocol-login";
+    const isTeamCheckout = state.format === "team-checkout";
+    document.body.classList.toggle('is-team-checkout', isTeamCheckout);
+    teamCheckout.refresh();
+    const isDedicatedPage = isLogin || isTeamCheckout;
+    document.querySelector('#team-checkout-workbench').classList.toggle('hidden', !isTeamCheckout);
+    document.querySelector('#team-checkout-workbench').setAttribute('aria-hidden', String(!isTeamCheckout));
     const isSub2apiOutput = state.format === "sub2api" || isTool;
     const isSplit = isTool && elements.sub2apiOperation.value === "split";
     elements.sub2apiToolConfig.classList.toggle("hidden", !isTool);
@@ -3862,10 +3871,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     elements.healthFilterLabel.classList.remove("hidden");
     elements.usageFilterLabel.classList.toggle("hidden", !isTool);
     elements.loginWorkbench.classList.toggle("hidden", !isLogin);
-    elements.converterWorkspace.classList.toggle("hidden", isLogin);
-    elements.converterWorkspace.setAttribute("aria-hidden", String(isLogin));
-    elements.converterActions.classList.toggle("hidden", isLogin);
-    elements.formatToolbar.classList.toggle("hidden", isLogin);
+    elements.converterWorkspace.classList.toggle("hidden", isDedicatedPage);
+    elements.converterWorkspace.setAttribute("aria-hidden", String(isDedicatedPage));
+    elements.converterActions.classList.toggle("hidden", isDedicatedPage);
+    elements.formatToolbar.classList.toggle("hidden", isDedicatedPage);
     elements.formatRail.classList.toggle("hidden", isLogin || isTool);
     const formatTabs = [...document.querySelectorAll("#format-list [role=\"tab\"]")];
     for (const tab of formatTabs) {
@@ -3886,6 +3895,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     syncLogoutAllSessionsButton();
   }
 
+  const teamCheckout = initializeTeamCheckout({ request: pageFetch, isWorkspaceCurrent: workspaceTaskIsCurrent });
   const selectFormat = (format) => {
     state.format = format;
     updateToolControls();
@@ -4188,6 +4198,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       node, value: node.value, checked: node.checked, disabled: node.disabled, type: node.type,
     }));
     const blockWorkspaceTasks = (release = false) => {
+      teamCheckout.reset();
       cancelHealthCheck();
       // A stale tab shares the browser owner ID: only an explicit clear may release it.
       stopSessionMonitor(release);
@@ -4204,6 +4215,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       document.querySelectorAll('input, textarea, select, button').forEach(node => { node.disabled = true; });
     };
     const resetWorkspaceView = (retained = null) => {
+      teamCheckout.reset();
       pushBusy = false;
       const format = state.format;
       Object.assign(state, createWorkspaceState(), { format }, retained?.state, { loginProgress: new Map() });

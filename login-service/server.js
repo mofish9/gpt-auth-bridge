@@ -82,6 +82,7 @@ import { buildSessionCodexRtBatch, publicSessionCodexRtResult, runSessionCodexRt
 import { hasStoredAuthCookies } from './src/services/cached-web-session.js';
 import { normalizeBusinessWorkspaceIds, extractBusinessWorkspaceIds } from './lib/business-workspace.js';
 import { registerConversionRoutes } from './src/api/routes/conversion-routes.js';
+import { registerTeamCheckoutRoutes } from './src/api/routes/team-checkout-routes.js';
 import { registerSessionExportRoutes } from './src/api/routes/session-export-routes.js';
 import { registerRemotePushRoutes } from './lib/remote-push.js';
 import { createSqliteRuntime, bindSqliteRuntimeToApp } from './src/bootstrap/sqlite-runtime.js';
@@ -148,6 +149,7 @@ let runtimeReady = Promise.resolve();
 const publicAccountView = account => projectPublicAccount(account, { sessionHealthLabel });
 
 const requireAdmin = (_req, _res, next) => next();
+registerTeamCheckoutRoutes(app);
 
 app.use(createApiRetiredMiddleware());
 

@@ -22,6 +22,7 @@
           <button class="top-nav-item" type="button" data-format="sub2api" data-format-group="converter" aria-pressed="true">格式转换</button>
           <button class="top-nav-item" type="button" data-format="sub2api-tools" aria-pressed="false">批处理工具</button>
           <button class="top-nav-item" type="button" data-format="protocol-login" aria-pressed="false">协议登录</button>
+          <button class="top-nav-item" type="button" data-format="team-checkout" aria-pressed="false" aria-controls="team-checkout-workbench">生成Team长链接</button>
         </nav>
         <div class="meta-row" aria-label="处理方式">
           <button type="button" class="top-nav-item clear-all-data" id="clear-browser-data" title="删除所有账号和结果，包括自定义代理、Sub2API、CPA 配置">清空所有数据</button>
@@ -100,6 +101,92 @@
           </select>
         </label>
       </div>
+
+      <section class="team-checkout-workbench hidden" id="team-checkout-workbench" aria-labelledby="team-checkout-title">
+        <div class="team-checkout-layout">
+          <form id="team-checkout-form" autocomplete="off">
+            <fieldset id="team-checkout-fields" class="team-checkout-fields">
+              <legend class="sr-only">Team 订阅信息</legend>
+              <div class="team-checkout-form-heading team-checkout-wide">
+                <h2 id="team-checkout-title">团队配置</h2>
+                <label class="team-period-control" for="team-price-interval"><span class="sr-only">付款周期</span>
+                  <select id="team-price-interval" name="priceInterval"><option value="month">月付订阅</option><option value="year">年付订阅</option></select>
+                </label>
+              </div>
+              <div class="team-proxy-choice team-checkout-wide" role="group" aria-label="代理方式">
+                <label><input type="radio" name="proxyMode" value="custom" checked /><span>自有代理</span></label>
+                <label><input type="radio" name="proxyMode" value="direct" /><span>服务器直连</span></label>
+              </div>
+              <label class="team-checkout-wide team-proxy-field" for="team-proxy-url">代理地址
+                <input id="team-proxy-url" name="proxyUrl" type="text" required maxlength="8192" data-private="true" spellcheck="false" autocomplete="off" placeholder="host:port:user:password" aria-describedby="team-proxy-hint" />
+                <small id="team-proxy-hint">支持 HTTP(S)、SOCKS5 代理 URL 或 host:port:user:password。代理需能被运行本工具的服务器访问。</small>
+              </label>
+              <div class="team-session-field team-checkout-wide">
+                <div class="team-field-heading"><label for="team-access-token">Session JSON 或 accessToken</label><a href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">获取 Session</a></div>
+                <textarea id="team-access-token" name="accessToken" required maxlength="262144" autocomplete="off" spellcheck="false" data-private="true" placeholder='粘贴 {"accessToken":"eyJ..."} 或纯 eyJ...' aria-describedby="team-token-hint" rows="6"></textarea>
+                <small id="team-token-hint">支持完整 Session JSON 或纯 Token，自动处理粘贴换行。凭据不保存，成功后清空 Session。</small>
+              </div>
+              <label class="team-workspace-field" for="team-workspace-name">工作区名称
+                <input id="team-workspace-name" name="workspaceName" type="text" required maxlength="100" value="MyTeam" placeholder="MyTeam" />
+              </label>
+              <label class="team-region-field" for="team-country">国家 / 地区
+                <select id="team-country" name="country">
+                  <option value="EG" selected>埃及（EG）</option><option value="US">美国（US）</option><option value="SE">瑞典（SE）</option><option value="PH">菲律宾（PH）</option><option value="TH">泰国（TH）</option><option value="GB">英国（GB）</option><option value="CA">加拿大（CA）</option><option value="ZA">南非（ZA）</option><option value="AU">澳大利亚（AU）</option><option value="JP">日本（JP）</option><option value="SG">新加坡（SG）</option><option value="DE">德国（DE）</option>
+                </select>
+              </label>
+              <label class="team-seats-field" for="team-seat-quantity">席位数
+                <input id="team-seat-quantity" name="seatQuantity" type="number" min="2" step="1" value="2" required />
+              </label>
+              <label class="team-checkout-wide" for="team-coupon">优惠码 / 链接 <span class="team-optional">可选</span>
+                <input id="team-coupon" name="coupon" type="text" maxlength="4096" placeholder="优惠码或完整优惠链接" spellcheck="false" />
+              </label>
+              <details class="team-checkout-advanced team-checkout-wide" id="team-advanced-settings">
+                <summary>已有工作区与账单货币</summary>
+                <div>
+                  <label for="team-existing-workspace">已有工作区 ID（选填）<input id="team-existing-workspace" name="existingWorkspaceId" type="text" maxlength="100" placeholder="留空则新建工作区" spellcheck="false" /></label>
+                  <label for="team-currency">账单货币<input id="team-currency" name="currency" type="text" value="EGP" minlength="3" maxlength="3" pattern="[A-Za-z]{3}" required /></label>
+                </div>
+              </details>
+              <label class="team-checkout-auto team-checkout-wide"><input id="team-auto-open" type="checkbox" checked />生成后自动打开支付页面</label>
+              <button class="button button-primary team-checkout-wide" id="generate-team-checkout" type="submit">生成长链接</button>
+              <p class="team-submit-note team-checkout-wide">仅生成结账链接，套餐与金额以支付页面为准。</p>
+            </fieldset>
+          </form>
+          <aside class="team-checkout-result" aria-label="当前配置与生成结果" aria-busy="false">
+            <section class="team-config-summary" aria-labelledby="team-config-title">
+              <h3 id="team-config-title">当前配置</h3>
+              <dl class="team-config-overview">
+                <div><dt>代理</dt><dd id="team-config-proxy">自有代理</dd></div>
+                <div><dt>地区</dt><dd id="team-config-country">埃及（EG）</dd></div>
+                <div><dt>席位</dt><dd id="team-config-seats">2</dd></div>
+              </dl>
+              <dl class="team-config-details">
+                <div><dt>订阅周期</dt><dd id="team-config-interval">月付订阅</dd></div>
+                <div><dt>账单货币</dt><dd id="team-config-currency">EGP</dd></div>
+                <div><dt>空间</dt><dd id="team-config-workspace">新建空间</dd></div>
+                <div><dt>价格参考</dt><dd>以支付页面为准</dd></div>
+              </dl>
+            </section>
+            <section class="team-region-reference" aria-labelledby="team-region-title">
+              <div class="team-field-heading"><h3 id="team-region-title">国家 / 地区与币种</h3><span>点击切换地区</span></div>
+              <div class="team-region-table-wrap"><table><thead><tr><th scope="col">国家 / 地区</th><th scope="col">当地货币</th></tr></thead><tbody id="team-region-list"></tbody></table></div>
+            </section>
+            <section class="team-generated-result" aria-labelledby="team-result-title">
+              <h3 id="team-result-title">支付长链接</h3>
+              <p id="team-checkout-status" role="status" aria-live="polite">填写团队配置后，点击“生成长链接”。</p>
+              <div id="team-checkout-output" hidden>
+                <p id="team-checkout-summary"></p>
+                <label for="team-checkout-url">生成结果<textarea id="team-checkout-url" readonly rows="4" spellcheck="false"></textarea></label>
+                <div class="team-checkout-actions">
+                  <button class="button button-secondary" id="copy-team-checkout" type="button">复制链接</button>
+                  <a class="button button-primary" id="open-team-checkout" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">打开支付页面</a>
+                </div>
+                <p id="team-checkout-session" class="team-checkout-session"></p>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </section>
 
       <section class="login-workbench hidden" id="login-workbench" aria-labelledby="login-title">
         <header class="login-header">

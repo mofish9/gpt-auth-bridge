@@ -17,5 +17,6 @@ export function browserRoutePolicy(path, method = 'GET') {
   if (verb === 'POST' && path === '/api/v2/admin/sub2api/groups') return { context: true };
   if (verb === 'GET' && ['/api/v2/health', '/api/v2/sot', '/api/v2/system/proxy-health'].includes(path)) return { context: false };
   if (verb === 'POST' && path === '/api/v2/system/stream-probe') return { context: false };
+  if (verb === 'POST' && path === '/api/v2/team/checkout') return { context: false };
   return { status: 404, code: 'NOT_FOUND' };
 }
