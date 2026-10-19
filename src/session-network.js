@@ -19,15 +19,18 @@ export async function withSessionTransport(run, { signal, pool, createFetch = cr
   }
 }
 
-export async function checkSessionHealth(account, { includeUsage = false, ...options } = {}) {
+export async function checkSessionHealth(account, { includeUsage = false, includeDevices = false, ...options } = {}) {
   const hasCookie = Boolean(account?.cookie || account?.cookies || account?.sessionCookie);
   const health = hasCookie ? await probeToken(account, options) : await probeUsage(account, options);
   const usage = includeUsage ? (hasCookie ? await probeUsage(account, options) : health) : null;
-  return { ...health, usage: usage?.usage || null, usageStatus: usage?.status ?? null, usageError: usage?.error || '' };
+  const devices = includeDevices && health.status === 200 ? await probeDevices(account, options) : null;
+  return { ...health, usage: usage?.usage || null, usageStatus: usage?.status ?? null, usageError: usage?.error || '',
+    deviceCount: devices?.deviceCount ?? null, devicesStatus: devices?.status ?? null, devicesError: devices?.error || '' };
 }
 
 const PROBE_URL = "https://chatgpt.com/backend-api/me";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const SESSIONS_URL = "https://chatgpt.com/backend-api/accounts/sessions";
 const LOGOUT_ALL_URL = "https://chatgpt.com/backend-api/accounts/logout_all";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36";
 
@@ -94,6 +97,25 @@ export async function probeUsage(account, { fetchImpl, signal } = {}) {
     return { status: response.status, code: extractErrorCode(payload), usage: response.ok ? normalizeUsage(payload) : null, error: response.ok ? "" : `HTTP ${response.status}` };
   } catch (error) { return { status: null, usage: null, error: String(error?.message || error).slice(0, 512) }; }
   finally { clearTimeout(timer); }
+}
+
+// Count the signed-in devices returned by the session manager, not app_sessions.
+export async function probeDevices(account, { fetchImpl, signal } = {}) {
+  if (!String(account?.accessToken || '').trim()) return { status: null, deviceCount: null, error: '缺少 access token' };
+  const headers = buildProbeHeaders(account, '/backend-api/accounts/sessions');
+  const deviceId = account?.deviceId || account?.oaiDeviceId;
+  if (deviceId) headers['oai-did'] = deviceId;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const response = await fetchImpl(SESSIONS_URL, { headers, signal: AbortSignal.any([controller.signal, signal].filter(Boolean)) });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) return { status: response.status, deviceCount: null, error: `HTTP ${response.status}` };
+    if (!Array.isArray(payload?.devices)) return { status: response.status, deviceCount: null, error: '设备列表响应无效' };
+    return { status: response.status, deviceCount: payload.devices.length, error: '' };
+  } catch (error) {
+    return { status: null, deviceCount: null, error: String(error?.message || error).slice(0, 512) };
+  } finally { clearTimeout(timer); }
 }
 
 export async function logoutAllSessions(account, options = {}) {

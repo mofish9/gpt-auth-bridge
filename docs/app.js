@@ -1519,6 +1519,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
        <td><div class="cell-clip" title="${escapeHtml(status + logoutText)}">${escapeHtml(status + logoutText)}</div></td>
        <td>${escapeHtml(formatWindow(usage?.fiveHour, planHasNoFiveHourWindow(usage?.planType)))}</td>
        <td>${escapeHtml(formatWindow(usage?.sevenDay))}</td>
+       <td title="${escapeHtml(result?.devicesError || '当前登录设备列表中的设备数量')}">${Number.isInteger(result?.deviceCount) && result.deviceCount >= 0 ? result.deviceCount : '未知'}</td>
        <td>${escapeHtml(updatedAt)}</td>
        <td><div class="cell-clip" title="${escapeHtml(item.sourceName)}">${escapeHtml(item.sourceName || "pasted-json")}</div></td>
      </tr>`;
@@ -1527,7 +1528,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   function renderHealth() {
     if (state.format === "sub2api-tools") {
       if (!toolHealthComplete()) {
-         elements.healthBody.innerHTML = '<tr><td colspan="7" class="empty">等待测活。</td></tr>';
+         elements.healthBody.innerHTML = '<tr><td colspan="8" class="empty">等待测活。</td></tr>';
         return;
       }
       const show200 = elements.healthFilter.value !== "non200";
@@ -1541,12 +1542,12 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         name: record.account?.name,
         email: record.account?.credentials?.email || record.account?.extra?.email,
         sourceName: "sub2api",
-       }, { ...result, usage: recordUsage(record, result) }, state.logoutResults.find((item) => item.index === result?.index))).join("") || `<tr><td colspan="7" class="empty">没有符合当前筛选的账号。</td></tr>`;
+       }, { ...result, usage: recordUsage(record, result) }, state.logoutResults.find((item) => item.index === result?.index))).join("") || `<tr><td colspan="8" class="empty">没有符合当前筛选的账号。</td></tr>`;
       return;
     }
     const complete = healthComplete();
     if (!complete) {
-       elements.healthBody.innerHTML = '<tr><td colspan="7" class="empty">等待测活。</td></tr>';
+       elements.healthBody.innerHTML = '<tr><td colspan="8" class="empty">等待测活。</td></tr>';
       return;
     }
     const show200 = elements.healthFilter.value !== "non200";
@@ -1555,7 +1556,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       .filter(({ result }) => show200 ? result?.status === 200 : result?.status !== 200);
     elements.healthBody.innerHTML = filtered
       .map(({ item, result }) => healthRow(item, result, state.logoutResults.find((logout) => logout.index === result?.index)))
-       .join("") || `<tr><td colspan="7" class="empty">没有${show200 ? " HTTP 200" : "非 200"}账号。</td></tr>`;
+       .join("") || `<tr><td colspan="8" class="empty">没有${show200 ? " HTTP 200" : "非 200"}账号。</td></tr>`;
   }
 
   async function readJsonResponse(response) {
@@ -1591,7 +1592,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         signal: controller.signal,
         credentials: "same-origin",
         headers: loginProxyHeaders({ "Content-Type": "application/json" }),
-         body: JSON.stringify({ includeUsage: true, concurrency, accounts: state.converted.map((item) => ({ accessToken: item.cpa.access_token, accountId: item.sub2apiAccount?.credentials?.chatgpt_account_id })) }),
+         body: JSON.stringify({ includeUsage: true, includeDevices: true, concurrency, accounts: state.converted.map((item) => ({ accessToken: item.cpa.access_token, accountId: item.sub2apiAccount?.credentials?.chatgpt_account_id })) }),
       });
       const payload = await readJsonResponse(response);
       if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
@@ -1641,7 +1642,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         signal: controller.signal,
         credentials: "same-origin",
         headers: loginProxyHeaders({ "Content-Type": "application/json" }),
-         body: JSON.stringify({ includeUsage: true, concurrency, accounts: state.toolRecords.map((record) => ({
+         body: JSON.stringify({ includeUsage: true, includeDevices: true, concurrency, accounts: state.toolRecords.map((record) => ({
            accessToken: record.account?.credentials?.access_token || record.account?.credentials?.accessToken || record.account?.access_token || record.account?.accessToken,
            accountId: record.account?.credentials?.chatgpt_account_id || record.account?.credentials?.account_id,
          })) }),

@@ -71,3 +71,54 @@ test('cancelled operations do not create network transports', async () => {
   controller.abort();
   await assert.rejects(withSessionTransport(() => assert.fail(), { signal: controller.signal, createFetch: () => assert.fail() }), { name: 'AbortError' });
 });
+
+
+test('device checks count devices rather than apps and share account authentication', async () => {
+  for (const devices of [[], [{ is_current_device: true, app_sessions: [{}, {}] }, { is_current_device: false }]]) {
+    const urls = [];
+    const result = await checkSessionHealth({ ...account, accountId: 'fixture-account', cookie: 'fixture=cookie', deviceId: 'fixture-device' }, {
+      includeUsage: true, includeDevices: true,
+      fetchImpl: async (url, init) => {
+        urls.push(url);
+        if (url.endsWith('/accounts/sessions')) {
+          assert.equal(init.headers.Authorization, 'Bearer fixture-access-token');
+          assert.equal(init.headers['chatgpt-account-id'], 'fixture-account');
+          assert.equal(init.headers.Cookie, 'fixture=cookie');
+          assert.equal(init.headers['oai-did'], 'fixture-device');
+          return Response.json({ devices });
+        }
+        return url.endsWith('/me') ? Response.json({}) : usage();
+      },
+    });
+    assert.equal(result.deviceCount, devices.length);
+    assert.equal(result.devicesStatus, 200);
+    assert.equal(result.status, 200);
+    assert.equal(result.usage.fiveHour.usedPercent, 25);
+    assert.equal(urls.length, 3);
+    assert.doesNotMatch(JSON.stringify(result), /app_sessions|is_current_device/);
+  }
+});
+
+test('device query failures stay unknown without changing successful health and usage', async () => {
+  for (const response of [() => Response.json({ error: 'private-fixture' }, { status: 403 }), () => Response.json({}), () => new Response('invalid-json'), () => { throw new Error('network unavailable'); }]) {
+    const result = await checkSessionHealth(account, { includeUsage: true, includeDevices: true,
+      fetchImpl: async url => url.endsWith('/accounts/sessions') ? response() : usage(),
+    });
+    assert.equal(result.status, 200);
+    assert.equal(result.usage.fiveHour.usedPercent, 25);
+    assert.equal(result.deviceCount, null);
+    assert.ok(result.devicesError);
+    assert.doesNotMatch(JSON.stringify(result), /private-fixture/);
+  }
+});
+
+test('failed health skips the optional device query', async () => {
+  const urls = [];
+  const result = await checkSessionHealth(account, { includeDevices: true, fetchImpl: async url => {
+    urls.push(url);
+    return Response.json({}, { status: 401 });
+  } });
+  assert.equal(urls.length, 1);
+  assert.equal(result.status, 401);
+  assert.equal(result.deviceCount, null);
+});

@@ -561,7 +561,7 @@ async function testAutomaticHealthFilterAndDownloadScope() {
           return {
             concurrency: 30,
             results: [
-              { index: 0, status: 200, error: "" },
+              { index: 0, status: 200, error: "", deviceCount: 2 },
               { index: 1, status: 401, error: "" },
             ],
           };
@@ -586,6 +586,8 @@ async function testAutomaticHealthFilterAndDownloadScope() {
   assert.equal(requests[0].url, "/api/session-health");
   assert.equal(JSON.parse(requests[0].init.body).accounts.length, 2);
   assert.equal(JSON.parse(requests[0].init.body).concurrency, 5);
+  assert.equal(JSON.parse(requests[0].init.body).includeDevices, true);
+  assert.match(elements.get("#health-body").innerHTML, />2<\/td>/);
   assert.equal(elements.get("#task-concurrency-value").textContent, "5");
   assert.match(elements.get("#health-body").innerHTML, /alive@example\.com/);
   assert.doesNotMatch(elements.get("#health-body").innerHTML, /invalid@example\.com/);
@@ -876,7 +878,8 @@ async function testSub2apiToolsRenderUsageWindows() {
         assert.equal(url, "/api/session-health");
         const request = JSON.parse(init.body);
         assert.equal(request.includeUsage, true);
-        return { results: [{ index: 0, status: 200, usage: {
+        assert.equal(request.includeDevices, true);
+        return { results: [{ index: 0, status: 200, deviceCount: 0, usage: {
           fiveHour: { usedPercent: 0, resetAfterSeconds: 3600 },
           sevenDay: { usedPercent: 0, resetAfterSeconds: 86400 },
           fetchedAt: Date.now(),
@@ -889,6 +892,7 @@ async function testSub2apiToolsRenderUsageWindows() {
   dispatch(elements.get("#session-input"), "input");
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.match(elements.get("#health-body").innerHTML, /0%/);
+  assert.match(elements.get("#health-body").innerHTML, />0<\/td>/);
 }
 
 async function testTeamPlusProUsageFiltersDoNotRequireFiveHourWindow() {
