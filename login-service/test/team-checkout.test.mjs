@@ -64,13 +64,46 @@ test('checkout validates parameters before sending any upstream request', async 
   }
 });
 
+test('checkout leases and disposes the shared HTTP transport for direct and custom proxy modes', async () => {
+  for (const proxyMode of ['direct', 'custom']) {
+    let calls = 0;
+    let disposed = 0;
+    const transport = async (_endpoint, options) => {
+      calls += 1;
+      assert.equal(options.redirect, 'manual');
+      return Response.json({ url: hostedUrl });
+    };
+    transport.dispose = async () => { disposed += 1; };
+    const result = await generateTeamCheckout({ ...input, proxyMode, proxyUrl: 'proxy.example:8080' }, {
+      createProxyFetch: (proxyUrl, options) => {
+        assert.equal(proxyUrl, proxyMode === 'direct' ? '' : 'http://proxy.example:8080/');
+        assert.equal(options.direct, proxyMode === 'direct');
+        return transport;
+      },
+    });
+    assert.equal(result.url, hostedUrl);
+    assert.equal(calls, 1);
+    assert.equal(disposed, 1);
+  }
+});
+
+test('checkout does not follow upstream redirects or retry with credentials', async () => {
+  let calls = 0;
+  await assert.rejects(generateTeamCheckout(input, { fetchImpl: async (_endpoint, options) => {
+    calls += 1;
+    assert.equal(options.redirect, 'manual');
+    return new Response('', { status: 307, headers: { Location: 'https://untrusted.example/' } });
+  } }), { code: 'CHECKOUT_REJECTED' });
+  assert.equal(calls, 1);
+});
+
 test('checkout supports all three hosted link response fields without returning the token', async () => {
   for (const field of ['url', 'stripe_hosted_url', 'checkout_url']) {
     const result = await generateTeamCheckout(input, { fetchImpl: async (endpoint, options) => {
       assert.equal(endpoint, 'https://chatgpt.com/backend-api/payments/checkout');
       assert.equal(options.method, 'POST');
       assert.equal(options.headers.Authorization, 'Bearer fixture-token');
-      assert.equal(options.redirect, 'error');
+      assert.equal(options.redirect, 'manual');
       assert.equal(JSON.parse(options.body).team_plan_data.seat_quantity, 2);
       assert.ok(options.signal instanceof AbortSignal);
       return Response.json({ [field]: hostedUrl, checkout_session_id: 'cs_test_fixture', secret: input.accessToken });

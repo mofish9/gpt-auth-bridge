@@ -1,4 +1,5 @@
-import { createProxiedFetch, normalizeProxyUrl } from '../../lib/proxy-config.js';
+import { normalizeProxyUrl } from '../../lib/proxy-config.js';
+import { createCurlCffiFetch } from '../../lib/curl-cffi-fetch.js';
 import { checkoutResponseDiagnostics, checkoutNetworkDiagnostics } from './team-checkout-diagnostics.js';
 
 const CHECKOUT_ENDPOINT = 'https://chatgpt.com/backend-api/payments/checkout';
@@ -102,7 +103,7 @@ export function validateTeamCheckoutUrl(value) {
   return url.href;
 }
 
-export async function generateTeamCheckout(input, { fetchImpl = fetch, createProxyFetch = createProxiedFetch, signal } = {}) {
+export async function generateTeamCheckout(input, { fetchImpl, createProxyFetch = createCurlCffiFetch, signal } = {}) {
   const { accessToken, proxyUrl, payload } = normalizeTeamCheckout(input);
   const deadline = AbortSignal.timeout(30_000);
   let response;
@@ -112,11 +113,11 @@ export async function generateTeamCheckout(input, { fetchImpl = fetch, createPro
   const diagnosticContext = { proxyConfigured: Boolean(proxyUrl), proxyChainConfigured: Boolean(proxyUrl && process.env.PROXY_CHAIN_URL), authorizationPresent: Boolean(accessToken) };
   try {
     signal?.throwIfAborted();
-    if (proxyUrl) proxyFetch = createProxyFetch(proxyUrl, { isolated: true });
+    if (proxyUrl || !fetchImpl) proxyFetch = createProxyFetch(proxyUrl, { direct: !proxyUrl });
     response = await (proxyFetch || fetchImpl)(CHECKOUT_ENDPOINT, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload), redirect: 'error',
+      body: JSON.stringify(payload), redirect: 'manual',
       signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
     });
     responseText = await response.text();
