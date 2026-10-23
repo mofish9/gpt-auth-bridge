@@ -1504,6 +1504,29 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     return { fiveHour, sevenDay, fetchedAt: extra.codex_usage_updated_at ? Date.parse(extra.codex_usage_updated_at) : null };
   }
 
+  function formatLoginTime(value) {
+    return typeof value === "number" && value > 0 && Number.isFinite(value) && !Number.isNaN(new Date(value).getTime())
+      ? new Date(value).toLocaleString() : "未知";
+  }
+
+  function openDeviceDetails(result, name) {
+    const dialog = document.querySelector('#device-details-dialog');
+    document.querySelector('#device-details-title').textContent = `${name || '账号'} · 在线设备`;
+    document.querySelector('#device-details-list').innerHTML = Array.isArray(result?.devices)
+      ? result.devices.map((device, index) => `<details class="device-detail">
+        <summary>${escapeHtml(device.apps?.join(' / ') || device.name || `设备 ${index + 1}`)}${device.current ? ' · 当前设备' : ''}
+          <span>${escapeHtml(device.description || [device.name, device.platform, device.osVersion].filter(Boolean).join(' · ') || '未知设备')}</span>
+          <span>${escapeHtml(formatLoginTime(device.lastLoginAt))} · ${escapeHtml(device.location || '地点未知')}</span>
+        </summary>
+        <dl><dt>会话创建时间</dt><dd>${escapeHtml(formatLoginTime(device.createdAt))}</dd>
+          <dt>最近登录时间</dt><dd>${escapeHtml(formatLoginTime(device.lastLoginAt))}</dd>
+          <dt>最近登录地点</dt><dd>${escapeHtml(device.location || '未知')}</dd>
+          <dt>系统</dt><dd>${escapeHtml([device.platform, device.osVersion].filter(Boolean).join(' ') || '未知')}</dd></dl>
+      </details>`).join('') || '<p>暂无登录设备。</p>'
+      : `<p>${escapeHtml(result?.devicesError || '暂无设备详情，请重新测活。')}</p>`;
+    dialog.showModal();
+  }
+
   function healthRow(item, result, logout) {
      const status = result?.status == null ? `失败：${result?.error || "未知错误"}` : `HTTP ${result.status}`;
      const logoutText = logout?.ok ? "；已退出全部会话" : (logout && logout.error ? `；退出失败：${logout.error}` : "");
@@ -1512,23 +1535,22 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
      // fallback classification says that window may be absent.
      const formatWindow = (window, unavailable = false) => unavailable && !window ? "不适用" : (window?.usedPercent == null ? "未知" : `${window.usedPercent}%${window.resetAfterSeconds != null ? `（${formatDuration(window.resetAfterSeconds)} 后）` : ""}`);
      const usage = result?.usage || item.usage;
-     const updatedAt = usage?.fetchedAt ? new Date(usage.fetchedAt).toLocaleString() : "未知";
+
      return `<tr>
        <td><div class="cell-clip" title="${escapeHtml(item.name)}">${escapeHtml(item.name || "-")}</div></td>
        <td><div class="cell-clip" title="${escapeHtml(item.email)}">${escapeHtml(item.email || "-")}</div></td>
        <td><div class="cell-clip" title="${escapeHtml(status + logoutText)}">${escapeHtml(status + logoutText)}</div></td>
        <td>${escapeHtml(formatWindow(usage?.fiveHour, planHasNoFiveHourWindow(usage?.planType)))}</td>
        <td>${escapeHtml(formatWindow(usage?.sevenDay))}</td>
-       <td title="${escapeHtml(result?.devicesError || '当前登录设备列表中的设备数量')}">${Number.isInteger(result?.deviceCount) && result.deviceCount >= 0 ? result.deviceCount : '未知'}</td>
-       <td>${escapeHtml(updatedAt)}</td>
-       <td><div class="cell-clip" title="${escapeHtml(item.sourceName)}">${escapeHtml(item.sourceName || "pasted-json")}</div></td>
+       <td title="${escapeHtml(result?.devicesError || '当前登录设备列表中的设备数量')}"><button type="button" class="device-count" data-device-index="${escapeHtml(String(result?.index ?? ""))}" aria-label="查看 ${escapeHtml(item.name || item.email || '账号')} 的在线设备详情">${Number.isInteger(result?.deviceCount) && result.deviceCount >= 0 ? result.deviceCount : '未知'}</button></td>
+       <td class="login-times"><span>最早：${escapeHtml(formatLoginTime(result?.firstLoginAt))}</span><span>最近：${escapeHtml(formatLoginTime(result?.lastLoginAt))}</span></td>
      </tr>`;
    }
 
   function renderHealth() {
     if (state.format === "sub2api-tools") {
       if (!toolHealthComplete()) {
-         elements.healthBody.innerHTML = '<tr><td colspan="8" class="empty">等待测活。</td></tr>';
+         elements.healthBody.innerHTML = '<tr><td colspan="7" class="empty">等待测活。</td></tr>';
         return;
       }
       const show200 = elements.healthFilter.value !== "non200";
@@ -1542,12 +1564,12 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         name: record.account?.name,
         email: record.account?.credentials?.email || record.account?.extra?.email,
         sourceName: "sub2api",
-       }, { ...result, usage: recordUsage(record, result) }, state.logoutResults.find((item) => item.index === result?.index))).join("") || `<tr><td colspan="8" class="empty">没有符合当前筛选的账号。</td></tr>`;
+       }, { ...result, usage: recordUsage(record, result) }, state.logoutResults.find((item) => item.index === result?.index))).join("") || `<tr><td colspan="7" class="empty">没有符合当前筛选的账号。</td></tr>`;
       return;
     }
     const complete = healthComplete();
     if (!complete) {
-       elements.healthBody.innerHTML = '<tr><td colspan="8" class="empty">等待测活。</td></tr>';
+       elements.healthBody.innerHTML = '<tr><td colspan="7" class="empty">等待测活。</td></tr>';
       return;
     }
     const show200 = elements.healthFilter.value !== "non200";
@@ -1556,7 +1578,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       .filter(({ result }) => show200 ? result?.status === 200 : result?.status !== 200);
     elements.healthBody.innerHTML = filtered
       .map(({ item, result }) => healthRow(item, result, state.logoutResults.find((logout) => logout.index === result?.index)))
-       .join("") || `<tr><td colspan="8" class="empty">没有${show200 ? " HTTP 200" : "非 200"}账号。</td></tr>`;
+       .join("") || `<tr><td colspan="7" class="empty">没有${show200 ? " HTTP 200" : "非 200"}账号。</td></tr>`;
   }
 
   async function readJsonResponse(response) {
@@ -4125,6 +4147,15 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     }
   });
   elements.downloadScope?.addEventListener("change", updateOutput);
+  elements.healthBody.addEventListener("click", event => {
+    const button = event.target.closest?.('[data-device-index]');
+    if (!button) return;
+    const index = Number(button.dataset.deviceIndex);
+    const result = state.health.find(item => item.index === index);
+    if (!result) return;
+    const account = state.format === "sub2api-tools" ? state.toolRecords[index]?.account : state.converted[index];
+    openDeviceDetails(result, account?.name || account?.email);
+  });
   elements.healthFilter?.addEventListener("change", renderHealth);
   elements.usageFilter?.addEventListener("change", () => {
     renderHealth();

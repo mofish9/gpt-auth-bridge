@@ -51,6 +51,7 @@ function createFakeElement(selector, options = {}) {
     click() {
       this.listeners.click?.({ target: this });
     },
+    showModal() { this.open = true; },
     remove() {},
     select() {},
     setAttribute(name, value) {
@@ -561,7 +562,9 @@ async function testAutomaticHealthFilterAndDownloadScope() {
           return {
             concurrency: 30,
             results: [
-              { index: 0, status: 200, error: "", deviceCount: 2 },
+              { index: 0, status: 200, error: "", deviceCount: 2, firstLoginAt: 1700000000000, lastLoginAt: 1800000000000,
+                devices: [{ apps: ['Codex'], description: 'Computer', platform: 'windows', current: true,
+                  location: '<script>city</script>', createdAt: 1700000000000, lastLoginAt: 1800000000000 }] },
               { index: 1, status: 401, error: "" },
             ],
           };
@@ -587,7 +590,18 @@ async function testAutomaticHealthFilterAndDownloadScope() {
   assert.equal(JSON.parse(requests[0].init.body).accounts.length, 2);
   assert.equal(JSON.parse(requests[0].init.body).concurrency, 5);
   assert.equal(JSON.parse(requests[0].init.body).includeDevices, true);
-  assert.match(elements.get("#health-body").innerHTML, />2<\/td>/);
+  assert.match(elements.get("#health-body").innerHTML, />2<\/button>/);
+  assert.match(elements.get("#health-body").innerHTML, /最早：/);
+  assert.match(elements.get("#health-body").innerHTML, /最近：/);
+  elements.get("#health-body").listeners.click({ target: { closest: () => ({ dataset: { deviceIndex: '0' } }) } });
+  assert.equal(elements.get('#device-details-dialog').open, true);
+  const details = elements.get('#device-details-list').innerHTML;
+  assert.match(details, /Codex/);
+  assert.match(details, /当前设备/);
+  assert.match(details, /会话创建时间/);
+  assert.match(details, /&lt;script&gt;city&lt;\/script&gt;/);
+  assert.doesNotMatch(details, /<script>/);
+
   assert.equal(elements.get("#task-concurrency-value").textContent, "5");
   assert.match(elements.get("#health-body").innerHTML, /alive@example\.com/);
   assert.doesNotMatch(elements.get("#health-body").innerHTML, /invalid@example\.com/);
@@ -892,7 +906,7 @@ async function testSub2apiToolsRenderUsageWindows() {
   dispatch(elements.get("#session-input"), "input");
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.match(elements.get("#health-body").innerHTML, /0%/);
-  assert.match(elements.get("#health-body").innerHTML, />0<\/td>/);
+  assert.match(elements.get("#health-body").innerHTML, />0<\/button>/);
 }
 
 async function testTeamPlusProUsageFiltersDoNotRequireFiveHourWindow() {

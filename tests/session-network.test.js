@@ -122,3 +122,39 @@ test('failed health skips the optional device query', async () => {
   assert.equal(result.status, 401);
   assert.equal(result.deviceCount, null);
 });
+
+
+test('device details expose display fields and aggregate current session dates only', async () => {
+  const result = await checkSessionHealth(account, { includeDevices: true, fetchImpl: async url =>
+    url.endsWith('/accounts/sessions') ? Response.json({ devices: [
+      { display_name: 'Computer', platform: 'windows', is_current_device: true,
+        session_created_at_seconds: 1700000000.125, last_signed_in_timestamp_second: 1800000000,
+        last_signed_in_city: 'Cypress', last_signed_in_region_code: 'TX', last_signed_in_country: 'US',
+        app_sessions: [{ client_name: 'ChatGPT Web' }, { client_name: 'Codex' }], session_id: 'private-session-id' },
+      { session_created_at_seconds: 1600000000, last_signed_in_timestamp_second: 1750000000 },
+      { session_created_at_seconds: null, last_signed_in_timestamp_second: '' },
+      { session_created_at_seconds: -1, last_signed_in_timestamp_second: 1e300 }, null,
+    ] }) : usage(),
+  });
+  assert.equal(result.deviceCount, 5);
+  assert.equal(result.firstLoginAt, 1600000000000);
+  assert.equal(result.lastLoginAt, 1800000000000);
+  assert.equal(result.devices[0].createdAt, 1700000000125);
+  assert.equal(result.devices[0].location, 'Cypress, TX, US');
+  assert.deepEqual(result.devices[0].apps, ['ChatGPT Web', 'Codex']);
+  assert.equal(result.devices[0].current, true);
+  assert.equal(result.devices[2].createdAt, null);
+  assert.equal(result.devices[3].lastLoginAt, null);
+  assert.doesNotMatch(JSON.stringify(result), /private-session-id|session_id/);
+});
+
+test('empty and unavailable device lists never manufacture login dates', async () => {
+  for (const payload of [{ devices: [] }, {}, { devices: [{}] }]) {
+    const result = await checkSessionHealth(account, { includeDevices: true, fetchImpl: async url =>
+      url.endsWith('/accounts/sessions') ? Response.json(payload) : usage(),
+    });
+    assert.equal(result.firstLoginAt, null);
+    assert.equal(result.lastLoginAt, null);
+    assert.equal(result.deviceCount, payload.devices?.length ?? null);
+  }
+});
