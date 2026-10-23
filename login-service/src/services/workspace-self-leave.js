@@ -86,6 +86,12 @@ export function clearedWorkspaceCredentials(account, workspaceIds) {
 export async function selfLeaveWorkspaces(account, { flow, signal, onLog = () => {}, persist = async () => {}, wait = ms => delay(ms, undefined, { signal }) }) {
   const issue = protocolLoginCredentialIssue(account);
   if (issue) throw new Error(issue);
+  // Keep request-local state current even when the repository replaces account rows.
+  account = { ...account };
+  const save = async patch => {
+    await persist(patch);
+    Object.assign(account, patch);
+  };
   const log = msg => onLog({ msg });
   let authenticated = false;
   const request = async (path, token, workspaceId = '', method = 'GET') => {
@@ -114,6 +120,29 @@ export async function selfLeaveWorkspaces(account, { flow, signal, onLog = () =>
     const record = await flow.loginCodexWithPhone({ preserveAuthSession: authenticated });
     authenticated = true;
     if (!record?.access_token) throw new Error('协议登录未返回工作区访问令牌');
+    if (ownEmail(record.access_token) && ownEmail(record.access_token) !== emailKey(account.email)) throw new Error('已保存令牌与输入邮箱不匹配');
+    if (workspaceId) selfLeaveIdentity(record.access_token, workspaceId, account.email, String(authClaims(catalogToken).chatgpt_user_id || ''));
+    const accountId = String(authClaims(record.access_token).chatgpt_account_id || '');
+    const expiresAt = Number(decodeJwtPayload(record.access_token).exp || 0);
+    const credentials = {
+      accessToken: record.access_token, accountId, expiresAt,
+      ...(record.refresh_token ? { refreshToken: record.refresh_token } : {}),
+      ...(record.id_token ? { idToken: record.id_token } : {}),
+    };
+    const patch = { storage_state_json: await flow.exportCookieStorageState() };
+    if (workspaceId) {
+      const existing = account.business_workspace_credentials || [];
+      patch.business_workspace_credentials = [
+        ...existing.filter(row => String(row.workspaceId) !== workspaceId),
+        { ...existing.find(row => String(row.workspaceId) === workspaceId), workspaceId, ...credentials },
+      ];
+    } else {
+      Object.assign(patch, { openai_access_token: record.access_token, openai_account_id: accountId, openai_token_expires_at: expiresAt,
+        ...(record.refresh_token ? { openai_rt: record.refresh_token } : {}),
+        ...(record.id_token ? { openai_id_token: record.id_token } : {}) });
+    }
+    // Save before DELETE: a failure must still return reusable auth in the browser snapshot.
+    await save(patch);
     return record.access_token;
   };
   let catalog;
@@ -183,7 +212,6 @@ export async function selfLeaveWorkspaces(account, { flow, signal, onLog = () =>
           }
           if (authenticationFailure(error) && !reauthenticated) {
             reauthenticated = true;
-            authenticated = false;
             token = await login(workspaceId);
             selfLeaveIdentity(token, workspaceId, account.email, userId);
             continue;
@@ -206,7 +234,7 @@ export async function selfLeaveWorkspaces(account, { flow, signal, onLog = () =>
       signal?.throwIfAborted();
       if (verified) {
         left.push(workspaceId);
-        await persist(clearedWorkspaceCredentials(account, left));
+        await save(clearedWorkspaceCredentials(account, left));
         results.push({ workspaceId, status: 'left' });
         log(`工作区 ${workspaceId} 已自退，复核通过`);
       } else {

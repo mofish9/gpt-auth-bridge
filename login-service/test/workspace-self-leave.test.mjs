@@ -22,6 +22,7 @@ function fixture({ saved = true, role = 'standard-user', handler, workspaces = [
   let deleted = new Set();
   const flow = {
     ensureChatGptDeviceCookie: async () => {}, ensureProxyConnectivity: async () => {},
+    exportCookieStorageState: async () => JSON.stringify({ cookies: [{ name: 'auth-session', value: 'fixture-cookie', domain: 'auth.openai.com', expires: -1 }] }),
     chatgptBackendHeaders: (accessToken, path, extra) => ({ authorization: `Bearer ${accessToken}`, 'oai-device-id': 'fixture-device', 'x-openai-target-path': path, ...extra }),
     loginCodexWithPhone: async options => { const id = flow.workspaceSelection.workspaceId || 'personal'; logins.push({ id, ...options }); return { access_token: token(id) }; },
     fetch: async (url, init) => {
@@ -62,6 +63,42 @@ test('missing AT uses password/TOTP OAuth for personal discovery and targeted wo
   const f = fixture({ saved: false });
   assert.equal((await selfLeaveWorkspaces(f.account, f.options)).left, 1);
   assert.deepEqual(f.logins, [{ id: 'personal', preserveAuthSession: false }, { id: 'team', preserveAuthSession: true }]);
+});
+
+test('failed self-leave saves OAuth tokens and cookies before retrying in a new request', async () => {
+  let failing = true;
+  const f = fixture({ saved: false, handler: call => call.method === 'DELETE' && failing ? Response.json({}, { status: 429 }) : null });
+  // Each invocation receives a new browser snapshot and a new isolated flow.
+  const stored = structuredClone(f.account);
+  f.options.persist = async patch => Object.assign(stored, structuredClone(patch));
+  assert.equal((await selfLeaveWorkspaces(structuredClone(stored), f.options)).failed, 1);
+  assert.equal(stored.openai_access_token, token('personal'));
+  assert.equal(stored.business_workspace_credentials[0].accessToken, token('team'));
+  assert.ok(JSON.parse(stored.storage_state_json).cookies.length);
+  const initialLogins = f.logins.length;
+  failing = false;
+  assert.equal((await selfLeaveWorkspaces(structuredClone(stored), { ...f.options, flow: { ...f.options.flow } })).left, 1);
+  assert.equal(f.logins.length, initialLogins, 'retry must use saved tokens without OAuth');
+  assert.deepEqual(stored.business_workspace_credentials, []);
+  assert.equal(stored.openai_access_token, token('personal'));
+});
+
+test('partial self-leave retains freshly authorized credentials only for remaining workspaces', async () => {
+  let failing = true;
+  const f = fixture({ saved: false, workspaces: ['team', 'other'], handler: call =>
+    call.method === 'DELETE' && call.path.includes('/other/') && failing ? Response.json({}, { status: 429 }) : null });
+  const stored = structuredClone(f.account);
+  f.options.persist = async patch => Object.assign(stored, structuredClone(patch));
+  const first = await selfLeaveWorkspaces(structuredClone(stored), f.options);
+  assert.equal(first.left, 1);
+  assert.equal(first.failed, 1);
+  assert.deepEqual(stored.business_workspace_credentials.map(row => row.workspaceId), ['other']);
+  assert.equal(stored.business_workspace_credentials[0].accessToken, token('other'));
+  const initialLogins = f.logins.length;
+  failing = false;
+  assert.equal((await selfLeaveWorkspaces(structuredClone(stored), { ...f.options, flow: { ...f.options.flow } })).left, 1);
+  assert.equal(f.logins.length, initialLogins);
+  assert.deepEqual(stored.business_workspace_credentials, []);
 });
 
 test('a cached Web Session for the exact team avoids OAuth and is cleared only after verified self-exit', async () => {
@@ -152,6 +189,18 @@ test('409 and 429 retry at 5/10/15 seconds, while 401/403 reauthenticates only o
   assert.equal(result.terminalReason, 'password_invalid');
   assert.equal(result.skipped, 1);
   assert.ok(!rejected.requests.some(row => row.path.includes('/other/')));
+});
+
+test('rejected workspace token renews OAuth using the current authenticated session', async () => {
+  let attempts = 0;
+  const f = fixture({ saved: false, handler: call => call.method === 'DELETE' && ++attempts === 1
+    ? Response.json({}, { status: 401 }) : null });
+  assert.equal((await selfLeaveWorkspaces(f.account, f.options)).left, 1);
+  assert.deepEqual(f.logins, [
+    { id: 'personal', preserveAuthSession: false },
+    { id: 'team', preserveAuthSession: true },
+    { id: 'team', preserveAuthSession: true },
+  ]);
 });
 
 test('429 recovery verifies membership before clearing credentials and stops retrying on success', async () => {
