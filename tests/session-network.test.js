@@ -1,9 +1,83 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { checkSessionHealth, logoutAllSessions, withSessionTransport } from '../src/session-network.js';
+import { checkSessionHealth, logoutAllSessions, withSessionTransport, probePlusTrial } from '../src/session-network.js';
 
 const account = { accessToken: 'fixture-access-token' };
 const usage = () => Response.json({ rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18000 } } });
+
+test('trial uses the selected transport and detected country without leaking credentials to geo lookup', async () => {
+  for (const country of ['US', 'DE', 'JP']) {
+    const urls = [];
+    let disposed = false;
+    const fetchImpl = async (url, init) => {
+      urls.push(url);
+      if (url.includes('/cdn-cgi/trace')) {
+        assert.deepEqual(init.headers, { Accept: 'text/plain' });
+        return new Response(`ip=192.0.2.1\nloc=${country}\n`);
+      }
+      assert.equal(init.headers.Authorization, `Bearer ${account.accessToken}`);
+      if (url.includes('/wham/usage')) return usage();
+      if (url.includes('/accounts/check')) return Response.json({ accounts: { selected: { account: { plan_type: 'free' } } } });
+      if (url.includes('/promotions/')) return Response.json({ is_eligible: true });
+      assert.ok(url.endsWith(`/configs/${country}`));
+      return Response.json({ country_code: country });
+    };
+    fetchImpl.dispose = async () => { disposed = true; };
+    const result = await withSessionTransport(options => checkSessionHealth({ ...account, accountId: 'selected' }, { ...options, includeTrial: true }), {
+      resolveProxy: () => ({ proxyUrl: 'http://selected-proxy:8080' }),
+      createFetch: proxy => { assert.equal(proxy, 'http://selected-proxy:8080'); return fetchImpl; },
+    });
+    assert.equal(result.trial.eligible, true);
+    assert.equal(result.trial.country, country);
+    assert.equal(result.status, 200);
+    assert.equal(urls.length, 5);
+    assert.equal(disposed, true);
+  }
+});
+
+test('unavailable geo lookup never falls back to a fixed country or changes account health', async () => {
+  const urls = [];
+  const result = await checkSessionHealth(account, { includeTrial: true, fetchImpl: async url => {
+    urls.push(url);
+    return url.includes('/wham/usage') ? usage() : new Response('invalid trace');
+  } });
+  assert.equal(result.status, 200);
+  assert.equal(result.trial.eligible, null);
+  assert.equal(result.trial.country, '');
+  assert.ok(result.trial.error);
+  assert.equal(urls.length, 2);
+});
+
+test('trial distinguishes explicit eligibility, paid plans, fallback campaigns and unavailable results', async () => {
+  const campaign = 'plus-1-month-free';
+  for (const fixture of [
+    { eligibility: { is_eligible: false }, promo: campaign, expected: false },
+    { eligibility: { is_eligible: true }, plan: 'plus', expected: false },
+    { eligibility: {}, promo: campaign, expected: true },
+    { eligibility: {}, expected: null },
+    { eligibility: null, expected: null },
+    { eligibility: {}, otherPromo: campaign, expected: null },
+  ]) {
+    const result = await probePlusTrial({ ...account, accountId: 'selected' }, { fetchImpl: async url => {
+      if (url.includes('/cdn-cgi/trace')) return new Response('loc=GB\n');
+      if (url.includes('/accounts/check')) return Response.json({ accounts: {
+        selected: { account: { plan_type: fixture.plan || 'free', eligible_promo_campaigns: { plus: fixture.promo } } },
+        other: { account: { eligible_promo_campaigns: { plus: fixture.otherPromo } } },
+      } });
+      if (url.includes('/promotions/')) return fixture.eligibility === null ? new Response('', { status: 403 }) : Response.json(fixture.eligibility);
+      return Response.json({});
+    } });
+    assert.equal(result.eligible, fixture.expected);
+    if (fixture.expected === null) assert.ok(result.error);
+  }
+});
+
+test('trial is skipped for unhealthy accounts', async () => {
+  let calls = 0;
+  const result = await checkSessionHealth(account, { includeTrial: true, fetchImpl: async () => { calls++; return new Response('', { status: 401 }); } });
+  assert.equal(result.trial, null);
+  assert.equal(calls, 1);
+});
 
 test('token-only health with usage uses a single upstream request', async () => {
   let calls = 0;

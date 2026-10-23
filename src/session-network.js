@@ -2,6 +2,8 @@ import { resolveSessionProxy } from '../login-service/lib/proxy-config.js';
 import { createCurlCffiFetch } from '../login-service/lib/curl-cffi-fetch.js';
 import { extractErrorCode } from '../login-service/src/lib/auth-behavior-contract.js';
 import { readLogoutAllResponse } from '../login-service/src/services/logout-all-response.js';
+import { CHATGPT_ACCOUNTS_CHECK_URL, CHATGPT_PLUS_TRIAL_CAMPAIGN, CHATGPT_PLUS_TRIAL_ELIGIBILITY_URL, CHATGPT_CHECKOUT_PRICING_CONFIG_URL } from '../login-service/lib/openai-auth-urls.js';
+import { decodeJwtPayload } from '../login-service/lib/jwt-utils.js';
 
 // A single account operation keeps the same proxy, cookie transport and cleanup.
 export async function withSessionTransport(run, { signal, pool, createFetch = createCurlCffiFetch, resolveProxy = resolveSessionProxy } = {}) {
@@ -19,12 +21,13 @@ export async function withSessionTransport(run, { signal, pool, createFetch = cr
   }
 }
 
-export async function checkSessionHealth(account, { includeUsage = false, includeDevices = false, ...options } = {}) {
+export async function checkSessionHealth(account, { includeUsage = false, includeDevices = false, includeTrial = false, ...options } = {}) {
   const hasCookie = Boolean(account?.cookie || account?.cookies || account?.sessionCookie);
   const health = hasCookie ? await probeToken(account, options) : await probeUsage(account, options);
   const usage = includeUsage ? (hasCookie ? await probeUsage(account, options) : health) : null;
   const devices = includeDevices && health.status === 200 ? await probeDevices(account, options) : null;
-  return { ...health, usage: usage?.usage || null, usageStatus: usage?.status ?? null, usageError: usage?.error || '',
+  const trial = includeTrial && health.status === 200 ? await probePlusTrial(account, options) : null;
+  return { ...health, trial, usage: usage?.usage || null, usageStatus: usage?.status ?? null, usageError: usage?.error || '',
     devices: devices?.devices ?? null, firstLoginAt: devices?.firstLoginAt ?? null, lastLoginAt: devices?.lastLoginAt ?? null,
     deviceCount: devices?.deviceCount ?? null, devicesStatus: devices?.status ?? null, devicesError: devices?.error || '' };
 }
@@ -34,6 +37,68 @@ const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const SESSIONS_URL = "https://chatgpt.com/backend-api/accounts/sessions";
 const LOGOUT_ALL_URL = "https://chatgpt.com/backend-api/accounts/logout_all";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36";
+
+export async function probePlusTrial(account, { fetchImpl, signal } = {}) {
+  let country = '';
+  const campaign = CHATGPT_PLUS_TRIAL_CAMPAIGN;
+  const errors = [];
+  const requestSignal = () => AbortSignal.any([AbortSignal.timeout(20_000), signal].filter(Boolean));
+  try {
+    if (!String(account?.accessToken || '').trim()) throw new Error('缺少 access token');
+    // Use the account's existing transport; never select another proxy for geo lookup.
+    // No account headers or cookies are sent to the geo provider.
+    const trace = await fetchImpl('https://www.cloudflare.com/cdn-cgi/trace', {
+      headers: { Accept: 'text/plain' }, signal: requestSignal(),
+    });
+    const text = await trace.text();
+    country = String(text.match(/(?:^|\n)loc=([a-z]{2})(?:\r?\n|$)/i)?.[1] || '').toUpperCase();
+    if (!trace.ok || !country || country === 'XX') throw new Error('无法识别代理出口国家');
+    const claims = decodeJwtPayload(account.accessToken);
+    const auth = claims?.['https://api.openai.com/auth'] || {};
+    const accountId = account.accountId || account.chatgptAccountId || auth.chatgpt_account_id || claims?.chatgpt_account_id;
+    const probeAccount = { ...account, accountId };
+    const read = async url => {
+      signal?.throwIfAborted();
+      try {
+        const route = new URL(url).pathname;
+        const response = await fetchImpl(url, {
+          headers: { ...buildProbeHeaders(probeAccount, route), Referer: `https://chatgpt.com/?openaicom_referred=true&promo_campaign=${campaign}` },
+          signal: requestSignal(),
+        });
+        if (!response.ok) { await response.body?.cancel(); throw new Error(`${route}: HTTP ${response.status}`); }
+        const payload = await response.json();
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error(`${route}: 响应无效`);
+        return payload;
+      } catch (error) { errors.push(String(error?.message || error)); return null; }
+    };
+    const accountsCheck = await read(CHATGPT_ACCOUNTS_CHECK_URL);
+    const eligibility = await read(CHATGPT_PLUS_TRIAL_ELIGIBILITY_URL);
+    const pricing = await read(CHATGPT_CHECKOUT_PRICING_CONFIG_URL(country));
+    const accounts = accountsCheck?.accounts || {};
+    // Never borrow another workspace's plan or promotion eligibility.
+    const row = accountId ? accounts[accountId] : (Object.keys(accounts).length === 1 ? Object.values(accounts)[0] : null);
+    const plan = String(row?.account?.plan_type || row?.account?.planType || row?.entitlement?.subscription_plan || auth.chatgpt_plan_type || claims?.chatgpt_plan_type || '').toLowerCase().replace(/^chatgpt/, '').replace(/plan$/, '');
+    const campaigns = row?.account?.eligible_promo_campaigns || row?.eligible_promo_campaigns;
+    const promo = campaigns?.plus || campaigns?.chatgptplusplan || campaigns?.ChatGPTPlus;
+    const promoId = typeof promo === 'string' ? promo : promo?.id || promo?.promo_campaign_id;
+    let eligible = null;
+    let reason = '';
+    if (['plus', 'pro', 'team', 'business', 'enterprise'].includes(plan)) {
+      eligible = false; reason = `already_${plan}`;
+    } else if (typeof eligibility?.is_eligible === 'boolean') {
+      eligible = eligibility.is_eligible;
+      reason = eligible ? 'eligibility_api' : String(eligibility.ineligible_reason?.code || eligibility.ineligible_reason?.message || 'user_not_eligible');
+    } else if (promoId === campaign) {
+      eligible = true; reason = `accounts_check:${promoId}`;
+    }
+    return { eligible, country, campaign, reason, planType: plan,
+      currency: String(pricing?.currency_config?.symbol_code || ''),
+      error: eligible === null ? (errors.join('；') || '资格接口未返回明确结果') : '',
+      warning: errors.join('；') };
+  } catch (error) {
+    return { eligible: null, country, campaign, error: String(error?.message || error).slice(0, 512) };
+  }
+}
 
 function buildProbeHeaders(account, route) {
   const h = { Authorization: `Bearer ${String(account?.accessToken || '').trim()}`, Accept: 'application/json', 'Accept-Language': account?.language || 'zh-CN,zh;q=0.9,en;q=0.8', Origin: 'https://chatgpt.com', Referer: 'https://chatgpt.com/', 'User-Agent': account?.userAgent || USER_AGENT, 'oai-language': account?.language || 'zh-CN', 'oai-device-id': account?.deviceId || account?.oaiDeviceId || '', 'oai-session-id': account?.sessionId || account?.oaiSessionId || '', 'oai-client-build-number': account?.clientBuildNumber || '10379027', 'oai-client-version': account?.clientVersion || 'prod', 'sec-ch-ua': account?.secChUa || '"Chromium";v="128", "Not A(Brand";v="24"', 'sec-ch-ua-mobile': '?0', 'sec-ch-ua-platform': '"Windows"', 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-origin', 'x-openai-target-path': route, 'x-openai-target-route': route };

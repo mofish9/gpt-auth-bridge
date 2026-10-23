@@ -563,6 +563,7 @@ async function testAutomaticHealthFilterAndDownloadScope() {
             concurrency: 30,
             results: [
               { index: 0, status: 200, error: "", deviceCount: 2, firstLoginAt: 1700000000000, lastLoginAt: 1800000000000,
+                trial: { eligible: true, country: 'US', reason: '<script>fixture</script>' },
                 devices: [{ apps: ['Codex'], description: 'Computer', platform: 'windows', current: true,
                   location: '<script>city</script>', createdAt: 1700000000000, lastLoginAt: 1800000000000 }] },
               { index: 1, status: 401, error: "" },
@@ -590,6 +591,10 @@ async function testAutomaticHealthFilterAndDownloadScope() {
   assert.equal(JSON.parse(requests[0].init.body).accounts.length, 2);
   assert.equal(JSON.parse(requests[0].init.body).concurrency, 5);
   assert.equal(JSON.parse(requests[0].init.body).includeDevices, true);
+  assert.equal(JSON.parse(requests[0].init.body).includeTrial, true);
+  assert.match(elements.get("#health-body").innerHTML, /有资格（US）/);
+  assert.match(elements.get("#health-body").innerHTML, /&lt;script&gt;fixture&lt;\/script&gt;/);
+  assert.doesNotMatch(elements.get("#health-body").innerHTML, /<script>/);
   assert.match(elements.get("#health-body").innerHTML, />2<\/button>/);
   assert.match(elements.get("#health-body").innerHTML, /最早：/);
   assert.match(elements.get("#health-body").innerHTML, /最近：/);

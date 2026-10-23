@@ -79,7 +79,7 @@ async function handleHealth(request, response) {
       const index = cursor++;
       const account = body.accounts[index];
       signal.throwIfAborted();
-      results[index] = { index, ...(await runAccountTask(() => withSessionTransport(options => checkSessionHealth(account, { ...options, includeUsage: body.includeUsage, includeDevices: body.includeDevices }), { signal }), { signal })) };
+      results[index] = { index, ...(await runAccountTask(() => withSessionTransport(options => checkSessionHealth(account, { ...options, includeUsage: body.includeUsage, includeDevices: body.includeDevices, includeTrial: body.includeTrial }), { signal }), { signal })) };
     }
   }));
   sendJson(response, 200, { ok: true, concurrency, results });
