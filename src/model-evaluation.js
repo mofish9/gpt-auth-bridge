@@ -1,5 +1,6 @@
-import { withSessionTransport } from './session-network.js';
+import { createProxiedFetch, resolveSessionProxy } from '../login-service/lib/proxy-config.js';
 import { runAccountTask } from '../login-service/lib/task-concurrency.js';
+import { readEvaluationEvents } from '../docs/evaluation-stream.js';
 
 export const EVALUATION_QUESTIONS = {
   candy: '在一个黑色的袋子里放有三种口味的馒头，每种馒头有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。数量如下：\n形状 | 苹果味 | 桃子味 | 西瓜味\n圆形 | 7 | 9 | 8\n五角星形 | 7 | 6 | 4\n参赛者需要在活动前决定摸出的馒头数目，那么最少取出多少个才能保证手中同时拥有不同形状的苹果味和桃子味馒头？圆形苹果配五角星桃子，或者圆形桃子配五角星苹果，都满足要求。帮我做一下，不调用任何工具、不联网、不要读取本地文件。请解释理由，最后单独一行写“答案：数字”。',
@@ -7,13 +8,28 @@ export const EVALUATION_QUESTIONS = {
 };
 
 export function validateEvaluation(body = {}) {
-  const { account, question, model = 'gpt-6-astra' } = body;
+  const { account, api, question, model = 'gpt-6-astra' } = body || {};
   if (!Object.hasOwn(EVALUATION_QUESTIONS, question) || typeof model !== 'string' || !/^[a-zA-Z0-9._-]{1,100}$/.test(model)
-    || typeof account?.accessToken !== 'string' || !account.accessToken.trim() || account.accessToken.length > 32768 || /[\r\n]/.test(account.accessToken)
-    || (account.accountId != null && (typeof account.accountId !== 'string' || account.accountId.length > 200 || /[\r\n]/.test(account.accountId)))) {
+    || (!api && (typeof account?.accessToken !== 'string' || !account.accessToken.trim() || account.accessToken.length > 32768 || /[\r\n]/.test(account.accessToken)
+    || (account.accountId != null && (typeof account.accountId !== 'string' || account.accountId.length > 200 || /[\r\n]/.test(account.accountId)))))) {
     throw Object.assign(new Error('请提供有效账号、模型和测试题'), { statusCode: 400 });
   }
-  return { account, question, model };
+  if (api) {
+    let endpoint;
+    try {
+      if (typeof api.baseUrl !== 'string' || api.baseUrl.length > 2048 || typeof api.key !== 'string' || !api.key.trim()
+        || api.key.length > 32768 || /[\r\n]/.test(api.key) || !['responses', 'chat'].includes(api.protocol)) throw new Error();
+      endpoint = new URL(api.baseUrl.trim());
+      if (!['https:', 'http:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error();
+      let path = endpoint.pathname.replace(/\/+$/, '').replace(/\/(?:responses|chat\/completions)$/, '');
+      if (!path) path = '/v1';
+      endpoint.pathname = `${path}/${api.protocol === 'chat' ? 'chat/completions' : 'responses'}`;
+    } catch {
+      throw Object.assign(new Error('请提供有效的 HTTP(S) API 地址、Key 和接口类型'), { statusCode: 400 });
+    }
+    return { question, model, endpoint: endpoint.href, key: api.key.trim(), protocol: api.protocol };
+  }
+  return { account, question, model, endpoint: 'https://chatgpt.com/backend-api/codex/responses', key: account.accessToken.trim(), protocol: 'responses' };
 }
 
 export function parseEvaluationResponse(text) {
@@ -48,23 +64,73 @@ export function gradeEvaluation(question, output) {
   return { status: /<html\b/i.test(html) && /<\/html>/i.test(html) && /<svg\b/i.test(html) ? 'manual_review' : 'invalid_format', html };
 }
 
-export async function evaluateModel(body, { signal, fetchImpl } = {}) {
-  const { account, question, model } = validateEvaluation(body);
+export async function evaluateModel(body, { signal, fetchImpl, onEvent = () => {} } = {}) {
+  const { account, question, model, endpoint, key, protocol } = validateEvaluation(body);
   const started = Date.now();
-  const run = async ({ fetchImpl, signal }) => {
-    const response = await fetchImpl('https://chatgpt.com/backend-api/codex/responses', {
-      method: 'POST', redirect: 'manual', timeout: 120,
-      signal: AbortSignal.any([AbortSignal.timeout(125_000), signal].filter(Boolean)),
-      headers: { Authorization: `Bearer ${account.accessToken.trim()}`, 'Content-Type': 'application/json', Accept: 'text/event-stream',
-        ...(account.accountId ? { 'ChatGPT-Account-Id': account.accountId } : {}) },
-      body: JSON.stringify({ model, stream: true, store: false, instructions: "Follow the user's request. No tools are available.",
-        input: [{ role: 'user', content: [{ type: 'input_text', text: EVALUATION_QUESTIONS[question] }] }], reasoning: { effort: 'medium' } }),
+  onEvent({ type: 'phase', phase: 'queued' });
+  const run = async fetchImpl => {
+    onEvent({ type: 'phase', phase: 'connecting' });
+    const requestBody = protocol === 'chat'
+      ? { model, stream: true, messages: [{ role: 'user', content: EVALUATION_QUESTIONS[question] }] }
+      : { model, stream: true, store: false, instructions: "Follow the user's request. No tools are available.",
+        input: [{ role: 'user', content: [{ type: 'input_text', text: EVALUATION_QUESTIONS[question] }] }], reasoning: { effort: 'medium' } };
+    const response = await fetchImpl(endpoint, {
+      method: 'POST', redirect: 'manual',
+      signal: AbortSignal.any([AbortSignal.timeout(150_000), signal].filter(Boolean)),
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'text/event-stream',
+        ...(account?.accountId ? { 'ChatGPT-Account-Id': account.accountId } : {}) },
+      body: JSON.stringify(requestBody),
     });
     if (!response.ok) { await response.body?.cancel(); throw new Error(`模型请求失败（HTTP ${response.status}）`); }
-    const text = await response.text();
-    if (Buffer.byteLength(text) > 2 * 1024 * 1024) throw new Error('模型响应过大');
-    const output = parseEvaluationResponse(text);
-    return { model, question, output, ...gradeEvaluation(question, output), durationMs: Date.now() - started };
+    onEvent({ type: 'phase', phase: 'waiting' });
+    let output = '', completed = false, firstTokenMs = null, usage = null;
+    const append = delta => {
+      if (typeof delta !== 'string' || !delta) return;
+      output += delta;
+      if (output.length > 256 * 1024) throw new Error('模型输出过大');
+      firstTokenMs ??= Date.now() - started;
+      onEvent({ type: 'delta', delta, firstTokenMs, durationMs: Date.now() - started });
+    };
+    if (response.headers.get('content-type')?.includes('application/json')) {
+      const text = await response.text();
+      if (text.length > 1024 * 1024) throw new Error('模型响应过大');
+      const data = JSON.parse(text);
+      if (protocol === 'chat') {
+        if (data.error || data.choices?.[0]?.finish_reason !== 'stop') throw new Error('模型响应未完成');
+        append(data.choices[0].message?.content);
+      } else append(parseEvaluationResponse(text));
+      completed = true;
+      usage = data.usage;
+    } else {
+      await readEvaluationEvents(response.body, event => {
+        if (event.error || ['error', 'response.failed', 'response.incomplete', 'response.cancelled'].includes(event.type)) throw new Error('模型返回失败或不完整的结果');
+        if (event.type === 'response.output_text.delta') append(event.delta);
+        if (['response.completed', 'response.done'].includes(event.type)) {
+          const canonical = parseEvaluationResponse(JSON.stringify(event.response));
+          if (!output) append(canonical);
+          output = canonical;
+          completed = true;
+          usage = event.response?.usage;
+        }
+        if (protocol === 'chat') {
+          const choice = event.choices?.find(item => item.index === 0) || event.choices?.[0];
+          append(choice?.delta?.content);
+          if (choice?.finish_reason) {
+            if (choice.finish_reason !== 'stop') throw new Error('模型返回失败或不完整的结果');
+            completed = true;
+          }
+          if (event.usage) usage = event.usage;
+        }
+      });
+    }
+    if (!completed || !output.trim()) throw new Error('模型响应未完成');
+    return { model, question, output, ...gradeEvaluation(question, output), firstTokenMs,
+      outputChars: output.length, outputTokens: usage?.output_tokens ?? usage?.completion_tokens ?? null, durationMs: Date.now() - started };
   };
-  return fetchImpl ? run({ fetchImpl, signal }) : runAccountTask(() => withSessionTransport(run, { signal }), { signal });
+  if (fetchImpl) return run(fetchImpl);
+  return runAccountTask(async () => {
+    const transport = createProxiedFetch(resolveSessionProxy().proxyUrl);
+    try { return await run(transport); }
+    finally { await transport.dispose(); }
+  }, { signal });
 }
