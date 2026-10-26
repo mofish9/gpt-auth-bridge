@@ -16,16 +16,23 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
   const frame = find('preview-frame'), dialog = find('preview-dialog'), largeFrame = find('large-frame');
   let controller, timer, generation = 0, jobs = [], selected = -1;
   let lastPreview = '', lastPreviewAt = 0, previewTimer, previewJob = null;
-  let importing = false;
+  let paused = false, rawOutput = false, importing = false;
+  const markdown = window.markdownit({ html: false, breaks: true, linkify: false });
+  markdown.disable('image');
   const importDialog = find('import-dialog');
   const mode = () => panel.querySelector('input[name="evaluation-source"]:checked').value;
   const currentJob = () => jobs[selected];
   const resize = () => {
-    for (const element of [frame, largeFrame]) element.style.transform = `scale(${element.parentElement.clientWidth / 1024})`;
+    panel.style.setProperty('--evaluation-top', `${document.querySelector('.topbar').getBoundingClientRect().height}px`);
+    for (const element of [frame, largeFrame]) {
+      const area = element.parentElement;
+      element.style.transform = `translate(-50%, -50%) scale(${Math.min(area.clientWidth / 1024, area.clientHeight / 768)})`;
+    }
   };
   const observer = new ResizeObserver(resize);
   observer.observe(frame.parentElement);
   observer.observe(largeFrame.parentElement);
+  observer.observe(document.querySelector('.topbar'));
 
   function refresh() {
     const eligibility = getEligibility();
@@ -55,6 +62,8 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
     find('preview-empty').hidden = Boolean(html);
     frame.hidden = !html;
     find('enlarge').disabled = !html;
+    find('pause').disabled = !html;
+    find('preview-hit').disabled = !html;
     if (!html) { frame.removeAttribute('srcdoc'); lastPreview = ''; previewJob = null; return; }
     if (html === lastPreview && job === previewJob) return;
     // Give CSS/SMIL animations time to play between document snapshots.
@@ -64,7 +73,7 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
       return;
     }
     lastPreviewAt = Date.now(); lastPreview = html; previewJob = job;
-    const safe = evaluationPreviewDocument(html);
+    const safe = evaluationPreviewDocument(html, { paused });
     frame.srcdoc = safe;
     if (dialog.open) largeFrame.srcdoc = safe;
     resize();
@@ -76,6 +85,7 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
     find('first-token').textContent = seconds(job?.firstTokenMs);
     find('chars').textContent = `${job?.output.length || 0} 字符`;
     find('tokens').textContent = job?.outputTokens ?? '—';
+    find('compact-metrics').textContent = job ? `${find('elapsed').textContent} · ${job.output.length} 字符` : '';
   }
 
   function renderSelected(force = false) {
@@ -91,7 +101,11 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
     });
     const output = find('output');
     const follow = output.scrollHeight - output.scrollTop - output.clientHeight < 60;
-    output.textContent = job?.output || (job && ACTIVE.includes(job.status) ? '等待模型输出…' : '模型输出将在这里逐步显示。');
+    const text = job?.output || (job && ACTIVE.includes(job.status) ? '等待模型输出…' : '模型输出将在这里逐步显示。');
+    output.classList.toggle('is-source', rawOutput || job?.question === 'pelican');
+    if (rawOutput || job?.question === 'pelican') output.textContent = text;
+    else output.innerHTML = markdown.render(text);
+    for (const link of output.querySelectorAll('a')) { link.target = '_blank'; link.rel = 'noopener noreferrer'; }
     if (follow) output.scrollTop = output.scrollHeight;
     find('case-error').hidden = !job?.error;
     find('case-error').textContent = job?.error || '';
@@ -107,6 +121,7 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
   function updateJob(job) {
     job.button.dataset.state = job.status;
     job.stateLabel.textContent = `${STATUS[job.status]}${job.output ? ` · ${job.output.length} 字符` : ''}`;
+    job.option.textContent = `${TITLES[job.question]} · ${job.label} · ${STATUS[job.status]}`;
     if (job === currentJob()) renderSelected(!ACTIVE.includes(job.status));
     const done = jobs.filter(item => !ACTIVE.includes(item.status)).length;
     find('progress').max = jobs.length || 1; find('progress').value = done;
@@ -115,6 +130,7 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
 
   function selectJob(index) {
     selected = index;
+    find('task-select').value = String(index);
     jobs.forEach((job, i) => job.button.setAttribute('aria-pressed', String(i === selected)));
     chooseView(currentJob()?.question === 'candy' ? 'output' : 'preview');
     renderSelected(true);
@@ -124,18 +140,21 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
     generation++; controller?.abort(); controller = null;
     clearInterval(timer); clearTimeout(previewTimer);
     jobs = []; selected = -1; lastPreview = ''; previewJob = null;
+    find('task-select').replaceChildren(); find('task-select').hidden = true;
     results.replaceChildren();
     const empty = document.createElement('p'); empty.className = 'evaluation-queue-empty'; empty.textContent = '开始后，点击任务查看生成过程。'; results.append(empty);
     find('queue-count').textContent = '0 项'; find('progress-count').textContent = '0 / 0'; find('progress').value = 0;
     status.textContent = '准备就绪，选择测试来源后开始。';
     find('api-key').value = '';
     if (dialog.open) dialog.close(); largeFrame.removeAttribute('srcdoc');
+    paused = false; syncPause();
     find('import-text').value = ''; find('import-files').value = '';
     if (importDialog.open) importDialog.close();
     chooseView('preview'); renderSelected(true); refresh();
   }
 
   find('import').addEventListener('click', () => { find('import-status').textContent = ''; importDialog.showModal(); });
+  find('task-select').addEventListener('change', event => selectJob(Number(event.target.value)));
   find('import-close').addEventListener('click', () => importDialog.close());
   find('import-form').addEventListener('submit', async event => {
     event.preventDefault(); if (importing) return;
@@ -159,6 +178,16 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
     } catch (error) { if (isCurrent()) find('import-status').textContent = error.message; }
     finally { importing = false; find('import-submit').disabled = false; }
   });
+  find('raw').addEventListener('click', () => {
+    rawOutput = !rawOutput; find('raw').setAttribute('aria-pressed', String(rawOutput));
+    find('raw').textContent = rawOutput ? 'Markdown 排版' : '查看原文'; chooseView('output'); renderSelected();
+  });
+  function syncPause() {
+    for (const name of ['pause', 'large-pause']) { find(name).textContent = paused ? '继续动画' : '暂停动画'; find(name).setAttribute('aria-pressed', String(paused)); }
+    for (const target of [frame, largeFrame]) target.contentWindow?.postMessage({ type: 'evaluation-animation', paused }, '*');
+  }
+  for (const name of ['pause', 'large-pause']) find(name).addEventListener('click', () => { paused = !paused; syncPause(); });
+  for (const target of [frame, largeFrame]) target.addEventListener('load', syncPause);
   panel.querySelectorAll('input[name="evaluation-source"]').forEach(input => input.addEventListener('change', refresh));
   for (const name of ['preview', 'output']) {
     find(`${name}-tab`).addEventListener('click', () => chooseView(name));
@@ -170,7 +199,9 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
       chooseView(next); find(`${next}-tab`).focus();
     });
   }
-  find('enlarge').addEventListener('click', () => { largeFrame.srcdoc = frame.srcdoc; dialog.showModal(); resize(); });
+  const enlarge = () => { largeFrame.srcdoc = evaluationPreviewDocument(currentJob().output, { paused }); dialog.showModal(); resize(); };
+  find('enlarge').addEventListener('click', enlarge);
+  find('preview-hit').addEventListener('click', enlarge);
   find('close-preview').addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => largeFrame.removeAttribute('srcdoc'));
   stop.addEventListener('click', () => { controller?.abort(); stop.disabled = true; status.textContent = '正在停止，保留已生成内容…'; });
@@ -200,7 +231,11 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
       button.append(title, target, stateLabel); results.append(button);
       return { account, question, label, model: chosenModel, status: 'queued', output: '', firstTokenMs: null, button, stateLabel };
     }));
-    jobs.forEach((job, index) => job.button.addEventListener('click', () => selectJob(index)));
+    find('task-select').replaceChildren(); find('task-select').hidden = false;
+    jobs.forEach((job, index) => {
+      job.button.addEventListener('click', () => selectJob(index));
+      job.option = document.createElement('option'); job.option.value = String(index); find('task-select').append(job.option);
+    });
     find('queue-count').textContent = `${jobs.length} 项`;
     selectJob(1); jobs.forEach(updateJob); refresh();
     status.textContent = `正在测试 ${accounts.length} 个${apiMode ? 'API 接入' : '测活通过的账号'}，每次并行执行 2 题。`;
