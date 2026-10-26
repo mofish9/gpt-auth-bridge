@@ -16,6 +16,8 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
   const frame = find('preview-frame'), dialog = find('preview-dialog'), largeFrame = find('large-frame');
   let controller, timer, generation = 0, jobs = [], selected = -1;
   let lastPreview = '', lastPreviewAt = 0, previewTimer, previewJob = null;
+  let importing = false;
+  const importDialog = find('import-dialog');
   const mode = () => panel.querySelector('input[name="evaluation-source"]:checked').value;
   const currentJob = () => jobs[selected];
   const resize = () => {
@@ -128,10 +130,35 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
     status.textContent = '准备就绪，选择测试来源后开始。';
     find('api-key').value = '';
     if (dialog.open) dialog.close(); largeFrame.removeAttribute('srcdoc');
+    find('import-text').value = ''; find('import-files').value = '';
+    if (importDialog.open) importDialog.close();
     chooseView('preview'); renderSelected(true); refresh();
   }
 
-  find('import').addEventListener('click', onImport);
+  find('import').addEventListener('click', () => { find('import-status').textContent = ''; importDialog.showModal(); });
+  find('import-close').addEventListener('click', () => importDialog.close());
+  find('import-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (importing) return;
+    importing = true; find('import-submit').disabled = true;
+    const isCurrent = isWorkspaceCurrent();
+    try {
+      const chunks = [find('import-text').value.trim()];
+      for (const file of find('import-files').files) {
+        if (file.size > 12 * 1024 * 1024) throw new Error('单个文件不能超过 12 MB。');
+        chunks.push(await file.text());
+      }
+      if (!isCurrent()) return;
+      const text = chunks.filter(Boolean).join('\n');
+      if (!text) throw new Error('请粘贴账号内容或选择文件。');
+      if (new TextEncoder().encode(text).length > 12 * 1024 * 1024) throw new Error('本次导入的总内容不能超过 12 MB。');
+      const result = await onImport(text);
+      if (!isCurrent()) return;
+      status.textContent = `已导入 ${result.count} 个账号${result.skipped ? `，跳过 ${result.skipped} 项` : ''}，正在测活。`;
+      importDialog.close();
+      refresh();
+    } catch (error) { if (isCurrent()) find('import-status').textContent = error.message; }
+    finally { importing = false; find('import-submit').disabled = false; }
+  });
   panel.querySelectorAll('input[name="evaluation-source"]').forEach(input => input.addEventListener('change', refresh));
   for (const name of ['preview', 'output']) {
     find(`${name}-tab`).addEventListener('click', () => chooseView(name));

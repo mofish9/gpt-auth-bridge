@@ -110,7 +110,10 @@ def main():
                 expect(page.locator('#evaluation-model')).to_have_value('gpt-6-astra')
                 page.locator('#evaluation-import').click()
                 accounts = [{'accessToken': 'fixture-token', 'user': {'email': email}} for email in ['first@example.com', 'failed@example.com', 'third@example.com']]
-                page.locator('#session-input').fill(json.dumps(accounts))
+                page.locator('#evaluation-import-text').fill(json.dumps(accounts))
+                page.locator('#evaluation-import-submit').click()
+                expect(page.locator('#evaluation-import-dialog')).not_to_be_visible()
+                expect(panel).to_be_visible()
                 expect(page.locator('#health-status')).to_contain_text('测活完成')
                 page.locator('#model-evaluation-tab').click()
                 expect(page.locator('#evaluation-account-count')).to_have_text('2 个可测试账号 / 3 个导入账号')

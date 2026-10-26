@@ -2075,3 +2075,12 @@ body.is-model-evaluation { background: #f5f7f8; }
   .top-nav { justify-content: flex-start; flex-basis: 100%; min-width: 0; }
   .top-nav > .top-nav-item { flex-shrink: 0; }
 }
+
+.evaluation-import-dialog { width: min(640px, calc(100vw - 24px)); padding: 24px; max-height: 90dvh; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+.evaluation-import-dialog::backdrop { background: #14212699; }
+.evaluation-import-dialog header { display: flex; align-items: center; justify-content: space-between; }
+.evaluation-import-dialog h2 { font-size: 20px; margin: 0; }
+.evaluation-import-dialog p { font-size: 13px; line-height: 1.7; color: var(--muted); }
+.evaluation-import-dialog label { display: grid; gap: 8px; margin: 16px 0; font-size: 13px; }
+.evaluation-import-dialog textarea { width: 100%; padding: 10px; border: 1px solid var(--line-strong); border-radius: 6px; resize: vertical; font: 12px/1.6 var(--mono); }
+#evaluation-import-status { color: var(--danger); }

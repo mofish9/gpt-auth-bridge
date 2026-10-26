@@ -119,8 +119,8 @@
                 </div>
                 <div id="evaluation-accounts-source" class="evaluation-source">
                   <p id="evaluation-account-count">暂无测活通过的账号</p>
-                  <small>仅测试格式转换中 HTTP 200 的账号，自动跳过失败和未测活账号。</small>
-                  <button type="button" class="evaluation-text-button" id="evaluation-import">前往格式转换导入账号</button>
+                  <small>导入后自动测活，仅测试 HTTP 200 的账号。</small>
+                  <button type="button" class="button button-secondary" id="evaluation-import">导入账号</button>
                 </div>
                 <div id="evaluation-api-source" class="evaluation-source" hidden>
                   <label for="evaluation-api-url">API 地址<input id="evaluation-api-url" type="url" placeholder="https://api.example.com/v1" maxlength="2048" spellcheck="false" /></label>
@@ -158,6 +158,16 @@
             </article>
           </div>
         </div>
+        <dialog id="evaluation-import-dialog" class="evaluation-import-dialog" aria-labelledby="evaluation-import-title">
+          <form id="evaluation-import-form">
+            <header><h2 id="evaluation-import-title">导入账号</h2><button type="button" id="evaluation-import-close" class="evaluation-text-button">关闭</button></header>
+            <p>粘贴 Session、CPA 或 Sub2API JSON，或选择多个 JSON / TXT 文件。导入后自动测活，只有通过的账号才能参与测试。</p>
+            <label for="evaluation-import-text">账号内容<textarea id="evaluation-import-text" rows="8" data-private="true" spellcheck="false" placeholder='{"accessToken":"…","user":{"email":"…"}}'></textarea></label>
+            <label for="evaluation-import-files">账号文件<input id="evaluation-import-files" type="file" multiple accept=".json,.txt,application/json,text/plain" /></label>
+            <p id="evaluation-import-status" role="status"></p>
+            <button class="button button-primary" id="evaluation-import-submit" type="submit">导入并测活</button>
+          </form>
+        </dialog>
         <dialog id="evaluation-preview-dialog" class="evaluation-preview-dialog" aria-labelledby="evaluation-dialog-title"><header><h2 id="evaluation-dialog-title">鹈鹕动画预览</h2><button type="button" class="button button-secondary" id="evaluation-close-preview">关闭预览</button></header><div class="evaluation-preview-surface"><iframe id="evaluation-large-frame" title="放大鹈鹕动画" sandbox="" referrerpolicy="no-referrer"></iframe></div></dialog>
       </section>
 

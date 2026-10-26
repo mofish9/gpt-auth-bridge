@@ -3942,7 +3942,14 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   const modelEvaluation = initializeModelEvaluation({
     request: pageFetch, isWorkspaceCurrent: workspaceTaskIsCurrent, getHeaders: loginProxyHeaders,
     getEligibility: () => evaluationEligibility,
-    onImport: () => selectFormat('sub2api'),
+    onImport: text => {
+      const sources = parseInputDocuments(text);
+      const valid = sources.filter(item => { try { convertSession(item.value); return true; } catch { return false; } });
+      if (!valid.length) throw new Error('未找到有效账号，请检查 Session、CPA 或 Sub2API JSON。');
+      elements.input.value = text;
+      scheduleConvert();
+      return { count: state.converted.length, skipped: state.skipped.length };
+    },
   });
   const selectFormat = (format) => {
     const previous = state.format;
