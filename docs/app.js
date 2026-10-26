@@ -1,5 +1,6 @@
 import { splitPasswordTotpLine } from './login-account-format.js';
 import { initializeTeamCheckout } from './team-checkout.js';
+import { initializeModelEvaluation } from './model-evaluation.js';
 import { validationFailureHint, validationFailureFields, validationFailureLabel } from './validation-failure.js';
 import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent } from './operation-contract.js';
 
@@ -1782,6 +1783,8 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function updateOutput() {
+    modelEvaluation.refresh();
+    document.querySelector('#model-evaluation').hidden = ['sub2api-tools', 'protocol-login', 'team-checkout'].includes(state.format);
     updatePushControls();
     persistBrowserWorkspace();
     const isTool = state.format === "sub2api-tools";
@@ -1864,6 +1867,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function scheduleConvert() {
+    modelEvaluation.reset();
     cancelHealthCheck();
     const text = elements.input.value;
     if (!text.trim()) {
@@ -3849,6 +3853,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     });
 
     state.sessions = documents;
+    modelEvaluation.reset();
     state.converted = converted;
     state.skipped = convertSkipped;
     elements.input.value = documents.length === 1
@@ -3920,6 +3925,12 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   const teamCheckout = initializeTeamCheckout({ request: pageFetch, isWorkspaceCurrent: workspaceTaskIsCurrent });
+  const modelEvaluation = initializeModelEvaluation({
+    request: pageFetch, isWorkspaceCurrent: workspaceTaskIsCurrent, getHeaders: loginProxyHeaders,
+    getAccounts: () => ['sub2api-tools', 'protocol-login', 'team-checkout'].includes(state.format) ? [] : state.converted.map(item => ({
+      email: item.cpa.email, accessToken: item.cpa.access_token, accountId: item.cpa.account_id,
+    })),
+  });
   const selectFormat = (format) => {
     state.format = format;
     updateToolControls();
@@ -4232,6 +4243,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     }));
     const blockWorkspaceTasks = (release = false) => {
       teamCheckout.reset();
+      modelEvaluation.reset();
       cancelHealthCheck();
       // A stale tab shares the browser owner ID: only an explicit clear may release it.
       stopSessionMonitor(release);
@@ -4249,6 +4261,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     };
     const resetWorkspaceView = (retained = null) => {
       teamCheckout.reset();
+      modelEvaluation.reset();
       pushBusy = false;
       const format = state.format;
       Object.assign(state, createWorkspaceState(), { format }, retained?.state, { loginProgress: new Map() });

@@ -93,6 +93,8 @@ function loadPageScript(options = {}) {
   };
 
   const context = {
+    // Model evaluation has its own browser integration coverage.
+    initializeModelEvaluation: () => ({ reset() {}, refresh() {} }),
     splitPasswordTotpLine,
     OPERATION_SCHEMA_VERSION,
     validatePushResults,

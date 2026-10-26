@@ -1955,3 +1955,11 @@ tr:last-child td {
 
 .device-dialog > p { margin: 14px 22px 0; color: var(--muted); font-size: 0.85rem; flex-shrink: 0; }
 #device-details-list { padding: 0 22px 16px; min-height: 0; overflow: auto; }
+
+.model-evaluation { margin: 16px 0; padding: 16px; border: 1px solid var(--border, #d9e2e4); border-radius: 12px; }
+.model-evaluation .actions { flex-wrap: wrap; }
+.model-evaluation input { max-width: 100%; padding: 8px; }
+.model-evaluation details { padding: 10px 0; border-top: 1px solid #d9e2e4; }
+.model-evaluation summary { cursor: pointer; overflow-wrap: anywhere; }
+.model-evaluation pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
+.model-evaluation iframe { width: 100%; height: 360px; border: 0; background: white; }

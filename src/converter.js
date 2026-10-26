@@ -4,6 +4,7 @@ import { operationMetadata } from '../docs/operation-contract.js';
 import { operationErrorPayload } from '../login-service/src/http/operation-error.js';
 
 import { runAccountTask } from '../login-service/lib/task-concurrency.js';
+import { evaluateModel, validateEvaluation } from './model-evaluation.js';
 
 import fs from "node:fs";
 import path from "node:path";
@@ -21,6 +22,7 @@ const STATIC_FILES = Object.freeze({
   "/operation-contract.js": "operation-contract.js",
   "/app.js": "app.js",
   "/team-checkout.js": "team-checkout.js",
+  "/model-evaluation.js": "model-evaluation.js",
   "/login-account-format.js": "login-account-format.js",
   "/validation-failure.js": "validation-failure.js",
   "/app.css": "app.css",
@@ -153,6 +155,18 @@ export function converterMiddleware(request, response, next) {
   Promise.resolve().then(async () => {
     if (["/api/health", "/api/ready", "/api/v2/health"].includes(pathname)) return next();
     if (pathname.startsWith("/api/")) {
+      if (pathname === '/api/model-evaluation' && request.method === 'POST') {
+        const body = await readJson(request);
+        validateEvaluation(body);
+        try {
+          const result = await evaluateModel(body, { signal: responseAbortSignal(response) });
+          return sendJson(response, 200, { ok: true, ...result });
+        } catch (error) {
+          if (response.destroyed) return;
+          const message = /^模型/.test(error.message) ? error.message : '测试请求失败或超时，请检查账号及代理后重试';
+          return sendJson(response, 502, { ok: false, error: message });
+        }
+      }
       if (pathname === "/api/session-health" && request.method === "POST") return handleHealth(request, response);
       if (pathname === "/api/logout-all-sessions" && request.method === "POST") return handleLogoutAllSessions(request, response);
       return next();
