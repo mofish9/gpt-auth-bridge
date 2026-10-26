@@ -54,8 +54,9 @@ def main():
                 expect(page.locator('#login-workbench')).to_be_hidden()
                 expect(page.locator('#format-toolbar')).to_be_hidden()
                 expect(page.locator('.top-nav [data-format="sub2api"]')).to_have_attribute('aria-pressed', 'false')
-                expect(page.locator('#team-config-proxy')).to_have_text('自有代理')
-                expect(page.locator('#team-proxy-url')).to_be_visible()
+                expect(page.locator('#team-config-proxy')).to_have_text('内置代理')
+                expect(page.locator('#team-proxy-url')).to_be_hidden()
+                expect(page.locator('input[name="proxyMode"][value="builtin"]')).to_be_checked()
                 expect(page.locator('.session-monitor')).to_be_hidden()
 
                 def checkout(route):
@@ -66,6 +67,15 @@ def main():
 
                 page.route('**/api/v2/team/checkout', checkout)
                 page.locator('#team-auto-open').uncheck()
+                page.locator('#team-access-token').fill('fixture-token')
+                page.locator('#generate-team-checkout').click()
+                expect(page.locator('#team-checkout-output')).to_be_visible()
+                assert requests[-1]['proxyMode'] == 'builtin'
+                assert 'proxyUrl' not in requests[-1]
+                requests.clear()
+                page.locator('input[name="proxyMode"][value="custom"]').check()
+                expect(page.locator('#team-proxy-url')).to_be_visible()
+                expect(page.locator('#team-config-proxy')).to_have_text('自定义代理')
                 session_json = json.dumps({'accessToken': 'fixture-secret-token'})
                 page.locator('#team-proxy-url').fill('proxy.example:8080:fixture-user:fixture-password')
                 page.locator('#team-access-token').fill(session_json)

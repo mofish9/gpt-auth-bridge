@@ -599,12 +599,10 @@ body.is-team-checkout { background: #fff; }
 .team-checkout-form-heading h2 { margin: 0; font-size: 1.2rem; }
 .team-checkout-form-heading .team-period-control { width: 114px; }
 .team-checkout-form-heading .team-period-control select { min-height: 34px; padding: 4px; border: 0; color: var(--team-muted); cursor: pointer; }
-.team-proxy-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 7px; background: var(--team-soft); }
-.team-proxy-choice label { cursor: pointer; }
-.team-proxy-choice input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
-.team-proxy-choice span { display: grid; min-height: 38px; place-items: center; border-radius: 5px; color: var(--team-muted); }
-.team-proxy-choice input:checked + span { background: #fff; color: #42594d; box-shadow: 0 1px 6px rgba(31, 61, 43, .12); }
-.team-proxy-choice input:focus-visible + span { outline: 2px solid var(--team-green); outline-offset: 1px; }
+.team-proxy-choice.login-mode-group { min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--team-line); border-radius: 6px; }
+.team-proxy-choice legend { padding: 0 6px; color: var(--team-text); font-size: .9rem; }
+.team-proxy-choice .login-mode-option { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.team-proxy-choice small { display: block; margin-top: 12px; }
 .team-field-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .team-field-heading a { color: #2e75a5; text-decoration: none; font-size: .85rem; font-weight: 600; }
 .team-session-field { display: grid; gap: 10px; margin: 8px 0; }

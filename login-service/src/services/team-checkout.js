@@ -43,14 +43,15 @@ function normalizeAccessToken(value) {
   return accessToken;
 }
 
-export function normalizeTeamCheckout(body = {}) {
+export function normalizeTeamCheckout(body = {}, { env = process.env } = {}) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw checkoutError('请求参数必须是 JSON 对象');
   const accessToken = normalizeAccessToken(body.accessToken);
   const proxyMode = body.proxyMode ?? (body.proxyUrl ? 'custom' : 'direct');
-  if (!['custom', 'direct'].includes(proxyMode)) throw checkoutError('请选择自有代理或服务器直连');
+  if (!['builtin', 'custom', 'direct'].includes(proxyMode)) throw checkoutError('请选择内置代理、自定义代理或服务器直连');
   let proxyUrl = '';
-  if (proxyMode === 'custom') {
-    const value = textField(body.proxyUrl, '代理地址', 8192, true);
+  if (proxyMode !== 'direct') {
+    if (proxyMode === 'builtin' && !env.TEAM_CHECKOUT_PROXY_URL?.trim()) throw checkoutError('内置代理未配置，请配置 TEAM_CHECKOUT_PROXY_URL 或选择自定义代理');
+    const value = textField(proxyMode === 'builtin' ? env.TEAM_CHECKOUT_PROXY_URL : body.proxyUrl, '代理地址', 8192, true);
     try {
       proxyUrl = normalizeProxyUrl(value);
       const proxy = new URL(proxyUrl);

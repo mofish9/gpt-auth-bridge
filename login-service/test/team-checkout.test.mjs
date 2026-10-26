@@ -8,6 +8,16 @@ import { normalizeTeamCheckout, validateTeamCheckoutUrl, generateTeamCheckout } 
 
 const input = { accessToken: 'fixture-token', workspaceName: '测试团队' };
 const hostedUrl = 'https://checkout.stripe.com/c/pay/cs_test_fixture#details';
+
+test('built-in checkout proxy resolves on server and never falls back when missing', () => {
+  const env = { TEAM_CHECKOUT_PROXY_URL: 'builtin-user:fixture-password@proxy.example:8080' };
+  const normalized = normalizeTeamCheckout({ ...input, proxyMode: 'builtin', proxyUrl: 'ignored.example:1234' }, { env });
+  assert.equal(normalized.proxyUrl, 'http://builtin-user:fixture-password@proxy.example:8080/');
+  assert.doesNotMatch(JSON.stringify(normalized.payload), /fixture-password|proxy.example/);
+  assert.throws(() => normalizeTeamCheckout({ ...input, proxyMode: 'builtin' }, { env: {} }), /内置代理未配置/);
+  assert.equal(normalizeTeamCheckout({ ...input, proxyMode: 'direct' }, { env }).proxyUrl, '');
+  assert.equal(normalizeTeamCheckout({ ...input, proxyMode: 'custom', proxyUrl: 'custom.example:8080' }, { env }).proxyUrl, 'http://custom.example:8080/');
+});
 const fixtureJwt = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
   + '.' + Buffer.from(JSON.stringify({ sub: 'fixture-user', exp: 4102444800 })).toString('base64url')
   + '.fixture-signature';

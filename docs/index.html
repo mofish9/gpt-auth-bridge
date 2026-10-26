@@ -113,11 +113,16 @@
                   <select id="team-price-interval" name="priceInterval"><option value="month">月付订阅</option><option value="year">年付订阅</option></select>
                 </label>
               </div>
-              <div class="team-proxy-choice team-checkout-wide" role="group" aria-label="代理方式">
-                <label><input type="radio" name="proxyMode" value="custom" checked /><span>自有代理</span></label>
-                <label><input type="radio" name="proxyMode" value="direct" /><span>服务器直连</span></label>
-              </div>
-              <label class="team-checkout-wide team-proxy-field" for="team-proxy-url">代理地址
+              <fieldset class="team-proxy-choice team-checkout-wide login-mode-group">
+                <legend>出口模式</legend>
+                <div class="login-mode-options">
+                  <label class="login-mode-option"><input type="radio" name="proxyMode" value="builtin" checked />内置代理</label>
+                  <label class="login-mode-option"><input type="radio" name="proxyMode" value="custom" />自定义代理</label>
+                  <label class="login-mode-option"><input type="radio" name="proxyMode" value="direct" />服务器直连</label>
+                </div>
+                <small>默认使用服务器配置的内置代理；也可指定自己的代理地址。</small>
+              </fieldset>
+              <label class="team-checkout-wide team-proxy-field hidden" for="team-proxy-url">代理地址
                 <input id="team-proxy-url" name="proxyUrl" type="text" required maxlength="8192" data-private="true" spellcheck="false" autocomplete="off" placeholder="host:port:user:password" aria-describedby="team-proxy-hint" />
                 <small id="team-proxy-hint">支持 HTTP(S)、SOCKS5 代理 URL 或 host:port:user:password。代理需能被运行本工具的服务器访问。</small>
               </label>
@@ -156,7 +161,7 @@
             <section class="team-config-summary" aria-labelledby="team-config-title">
               <h3 id="team-config-title">当前配置</h3>
               <dl class="team-config-overview">
-                <div><dt>代理</dt><dd id="team-config-proxy">自有代理</dd></div>
+                <div><dt>代理</dt><dd id="team-config-proxy">内置代理</dd></div>
                 <div><dt>地区</dt><dd id="team-config-country">埃及（EG）</dd></div>
                 <div><dt>席位</dt><dd id="team-config-seats">2</dd></div>
               </dl>

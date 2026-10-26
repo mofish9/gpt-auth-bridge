@@ -75,7 +75,9 @@ test('protocol login UI exposes Session and all-workspace RT modes with Sub2 pus
   assert.match(source, /<input type="radio" name="login-workspace-mode" value="all" checked \/>全部工作区 RT/);
   assert.match(source, /id="login-proxy-mode"/);
   assert.match(source, /name="login-proxy-mode" value="local"[^>]*\/>本地代理/);
-  assert.doesNotMatch(source, /内置代理池|value="builtin"/);
+  const proxyOptions = source.match(/<fieldset id="login-proxy-mode"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
+  assert.ok(proxyOptions, 'protocol login proxy options must exist');
+  assert.doesNotMatch(proxyOptions, /内置代理池|value="builtin"/);
   assert.match(source, /id="login-proxy-local-port"/);
   assert.match(source, /id="login-proxy-pool"/);
   assert.match(source, /配置只保存在当前浏览器/);

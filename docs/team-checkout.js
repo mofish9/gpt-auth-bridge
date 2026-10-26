@@ -33,11 +33,12 @@ export function initializeTeamCheckout({ request = fetch, isWorkspaceCurrent = (
   function refresh({ countryChanged = false } = {}) {
     const region = TEAM_CHECKOUT_REGIONS.find(item => item.country === countryInput.value) || TEAM_CHECKOUT_REGIONS[0];
     if (countryChanged) currencyInput.value = region.currency;
-    const direct = document.querySelector('input[name="proxyMode"]:checked')?.value === 'direct';
-    proxyInput.disabled = direct;
-    proxyInput.required = !direct;
-    document.querySelector('.team-proxy-field').classList.toggle('hidden', direct);
-    document.querySelector('#team-config-proxy').textContent = direct ? '服务器直连' : '自有代理';
+    const proxyMode = document.querySelector('input[name="proxyMode"]:checked')?.value || 'builtin';
+    const custom = proxyMode === 'custom';
+    proxyInput.disabled = !custom;
+    proxyInput.required = custom;
+    document.querySelector('.team-proxy-field').classList.toggle('hidden', !custom);
+    document.querySelector('#team-config-proxy').textContent = { builtin: '内置代理', custom: '自定义代理', direct: '服务器直连' }[proxyMode];
     document.querySelector('#team-config-country').textContent = region.name + '（' + region.country + '）';
     document.querySelector('#team-config-seats').textContent = document.querySelector('#team-seat-quantity').value || '2';
     document.querySelector('#team-config-currency').textContent = currencyInput.value || region.currency;
@@ -118,7 +119,7 @@ export function initializeTeamCheckout({ request = fetch, isWorkspaceCurrent = (
     const isCurrent = isWorkspaceCurrent();
     if (!isCurrent()) return;
     const values = Object.fromEntries(new FormData(form));
-    if (values.proxyMode === 'direct') delete values.proxyUrl;
+    if (values.proxyMode !== 'custom') delete values.proxyUrl;
     values.seatQuantity = Number(values.seatQuantity);
     const autoOpen = document.querySelector('#team-auto-open').checked;
     clearResult();
