@@ -1,114 +1,230 @@
-const TITLES = { candy: '糖果题（参考摸馒头）', pelican: '鹈鹕骑自行车' };
-const STATUS = { queued: '排队中', running: '测试中', passed: '答案正确（21）', wrong_answer: '答案错误', invalid_format: '格式不完整', manual_review: '待人工评审', error: '请求失败', cancelled: '已停止' };
+import { readEvaluationEvents } from './evaluation-stream.js';
+import { evaluationPreviewDocument } from './evaluation-preview.js';
 
-export function initializeModelEvaluation({ request, getAccounts, getHeaders, isWorkspaceCurrent }) {
+const TITLES = { candy: '糖果题', pelican: '鹈鹕骑自行车' };
+const STATUS = { queued: '排队中', connecting: '连接模型', waiting: '等待首字', generating: '生成中', passed: '答案正确（21）', wrong_answer: '答案错误', invalid_format: '格式不完整', manual_review: '待人工评审', error: '请求失败', cancelled: '已停止' };
+const ACTIVE = ['queued', 'connecting', 'waiting', 'generating'];
+const seconds = ms => ms == null ? '—' : `${(ms / 1000).toFixed(1)} s`;
+
+export function initializeModelEvaluation({ request, getEligibility, getHeaders, isWorkspaceCurrent, onImport }) {
   const panel = document.querySelector('#model-evaluation');
   if (!panel) return { reset() {}, refresh() {} };
-  const start = panel.querySelector('[data-evaluation-start]');
-  const stop = panel.querySelector('[data-evaluation-stop]');
-  const model = panel.querySelector('input');
-  const status = panel.querySelector('[role=status]');
+  const find = id => panel.querySelector(`#evaluation-${id}`);
+  const start = panel.querySelector('[data-evaluation-start]'), stop = panel.querySelector('[data-evaluation-stop]');
   const results = panel.querySelector('[data-evaluation-results]');
-  let controller;
-  let generation = 0;
-  const refresh = () => { start.disabled = Boolean(controller) || !getAccounts().length; };
-  const reset = () => {
-    generation++;
-    controller?.abort();
-    controller = null;
-    results.replaceChildren();
-    status.textContent = '每个转换账号测试两题；糖果题沿用参考项目的摸馒头题，预期答案 21。';
-    stop.disabled = true;
-    model.disabled = false;
-    refresh();
+  const status = find('status'), model = find('model'), fields = find('fields');
+  const frame = find('preview-frame'), dialog = find('preview-dialog'), largeFrame = find('large-frame');
+  let controller, timer, generation = 0, jobs = [], selected = -1;
+  let lastPreview = '', lastPreviewAt = 0, previewTimer, previewJob = null;
+  const mode = () => panel.querySelector('input[name="evaluation-source"]:checked').value;
+  const currentJob = () => jobs[selected];
+  const resize = () => {
+    for (const element of [frame, largeFrame]) element.style.transform = `scale(${element.parentElement.clientWidth / 1024})`;
   };
-  stop.addEventListener('click', () => controller?.abort());
-  start.addEventListener('click', async () => {
-    if (controller) return;
+  const observer = new ResizeObserver(resize);
+  observer.observe(frame.parentElement);
+  observer.observe(largeFrame.parentElement);
+
+  function refresh() {
+    const eligibility = getEligibility();
+    find('account-count').textContent = eligibility.pending ? `正在测活 ${eligibility.total} 个账号…`
+      : `${eligibility.accounts.length} 个可测试账号 / ${eligibility.total} 个导入账号`;
+    const apiMode = mode() === 'api';
+    find('accounts-source').hidden = apiMode;
+    find('api-source').hidden = !apiMode;
+    start.disabled = Boolean(controller) || (!apiMode && !eligibility.accounts.length);
+    fields.disabled = Boolean(controller);
+    stop.disabled = !controller;
+  }
+
+  function chooseView(view) {
+    for (const name of ['preview', 'output']) {
+      find(`${name}-tab`).setAttribute('aria-selected', String(name === view));
+      find(`${name}-tab`).tabIndex = name === view ? 0 : -1;
+      find(`${name}-pane`).hidden = name !== view;
+    }
+    resize();
+  }
+
+  function renderPreview(force = false) {
+    clearTimeout(previewTimer);
+    const job = currentJob();
+    const html = job?.question === 'pelican' && /<(?:svg|html|body)\b/i.test(job.output) ? job.output : '';
+    find('preview-empty').hidden = Boolean(html);
+    frame.hidden = !html;
+    find('enlarge').disabled = !html;
+    if (!html) { frame.removeAttribute('srcdoc'); lastPreview = ''; previewJob = null; return; }
+    if (html === lastPreview && job === previewJob) return;
+    // Give CSS/SMIL animations time to play between document snapshots.
+    const wait = 1500 - (Date.now() - lastPreviewAt);
+    if (!force && job === previewJob && wait > 0) {
+      previewTimer = setTimeout(() => renderPreview(true), wait);
+      return;
+    }
+    lastPreviewAt = Date.now(); lastPreview = html; previewJob = job;
+    const safe = evaluationPreviewDocument(html);
+    frame.srcdoc = safe;
+    if (dialog.open) largeFrame.srcdoc = safe;
+    resize();
+  }
+
+  function renderMetrics() {
+    const job = currentJob();
+    find('elapsed').textContent = job?.startedAt ? seconds(ACTIVE.includes(job.status) ? Date.now() - job.startedAt : job.durationMs) : '—';
+    find('first-token').textContent = seconds(job?.firstTokenMs);
+    find('chars').textContent = `${job?.output.length || 0} 字符`;
+    find('tokens').textContent = job?.outputTokens ?? '—';
+  }
+
+  function renderSelected(force = false) {
+    const job = currentJob();
+    find('case-title').textContent = job ? TITLES[job.question] : '鹈鹕骑自行车';
+    find('case-target').textContent = job ? `${job.label} · ${job.model}` : '生成内容将在这里逐步呈现';
+    find('case-status').textContent = job ? STATUS[job.status] : '等待开始';
+    find('case-status').dataset.state = job?.status || '';
+    const phaseIndex = job ? (ACTIVE.includes(job.status) ? ACTIVE.indexOf(job.status) : ['cancelled', 'error'].includes(job.status) ? -1 : 4) : -1;
+    panel.querySelectorAll('[data-phase]').forEach((node, index) => {
+      node.dataset.done = String(phaseIndex >= index);
+      if (phaseIndex === index) node.setAttribute('aria-current', 'step'); else node.removeAttribute('aria-current');
+    });
+    const output = find('output');
+    const follow = output.scrollHeight - output.scrollTop - output.clientHeight < 60;
+    output.textContent = job?.output || (job && ACTIVE.includes(job.status) ? '等待模型输出…' : '模型输出将在这里逐步显示。');
+    if (follow) output.scrollTop = output.scrollHeight;
+    find('case-error').hidden = !job?.error;
+    find('case-error').textContent = job?.error || '';
+    find('output-note').textContent = ['cancelled', 'error'].includes(job?.status)
+      ? '已保留收到的部分内容；当前预览可能不完整。'
+      : job?.question === 'candy' ? '糖果题沿用参考项目的摸馒头题。预期答案：21；以最后一行答案判分。'
+        : job && ACTIVE.includes(job.status) ? '正在生成，画面约每 1.5 秒更新一次。未闭合的图形会随后续内容逐步补全。'
+          : '鹈鹕题保留 CSS / SVG 动画，完成后由你评审画面质量。';
+    find('preview-tab').disabled = job?.question === 'candy';
+    renderMetrics(); renderPreview(force);
+  }
+
+  function updateJob(job) {
+    job.button.dataset.state = job.status;
+    job.stateLabel.textContent = `${STATUS[job.status]}${job.output ? ` · ${job.output.length} 字符` : ''}`;
+    if (job === currentJob()) renderSelected(!ACTIVE.includes(job.status));
+    const done = jobs.filter(item => !ACTIVE.includes(item.status)).length;
+    find('progress').max = jobs.length || 1; find('progress').value = done;
+    find('progress-count').textContent = `${done} / ${jobs.length}`;
+  }
+
+  function selectJob(index) {
+    selected = index;
+    jobs.forEach((job, i) => job.button.setAttribute('aria-pressed', String(i === selected)));
+    chooseView(currentJob()?.question === 'candy' ? 'output' : 'preview');
+    renderSelected(true);
+  }
+
+  function reset() {
+    generation++; controller?.abort(); controller = null;
+    clearInterval(timer); clearTimeout(previewTimer);
+    jobs = []; selected = -1; lastPreview = ''; previewJob = null;
+    results.replaceChildren();
+    const empty = document.createElement('p'); empty.className = 'evaluation-queue-empty'; empty.textContent = '开始后，点击任务查看生成过程。'; results.append(empty);
+    find('queue-count').textContent = '0 项'; find('progress-count').textContent = '0 / 0'; find('progress').value = 0;
+    status.textContent = '准备就绪，选择测试来源后开始。';
+    find('api-key').value = '';
+    if (dialog.open) dialog.close(); largeFrame.removeAttribute('srcdoc');
+    chooseView('preview'); renderSelected(true); refresh();
+  }
+
+  find('import').addEventListener('click', onImport);
+  panel.querySelectorAll('input[name="evaluation-source"]').forEach(input => input.addEventListener('change', refresh));
+  for (const name of ['preview', 'output']) {
+    find(`${name}-tab`).addEventListener('click', () => chooseView(name));
+    find(`${name}-tab`).addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const next = name === 'preview' ? 'output' : 'preview';
+      if (find(`${next}-tab`).disabled) return;
+      chooseView(next); find(`${next}-tab`).focus();
+    });
+  }
+  find('enlarge').addEventListener('click', () => { largeFrame.srcdoc = frame.srcdoc; dialog.showModal(); resize(); });
+  find('close-preview').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('close', () => largeFrame.removeAttribute('srcdoc'));
+  stop.addEventListener('click', () => { controller?.abort(); stop.disabled = true; status.textContent = '正在停止，保留已生成内容…'; });
+
+  find('form').addEventListener('submit', async event => {
+    event.preventDefault(); if (controller) return;
     const chosenModel = model.value.trim();
     if (!/^[a-zA-Z0-9._-]{1,100}$/.test(chosenModel)) { status.textContent = '请选择或输入有效模型名称。'; return; }
-    const accounts = getAccounts();
-    if (!accounts.length) return;
-    const current = new AbortController();
-    controller = current;
-    const run = ++generation;
-    const isCurrent = isWorkspaceCurrent(current.signal);
-    const active = () => run === generation && isCurrent();
-    results.replaceChildren();
-    model.disabled = true;
-    stop.disabled = false;
-    refresh();
-    let done = 0;
-    const jobs = accounts.flatMap((account, index) => Object.keys(TITLES).map(question => {
-      const row = document.createElement('details');
-      const summary = document.createElement('summary');
-      const label = `${account.email || `账号 ${index + 1}`} · ${TITLES[question]}`;
-      summary.textContent = `${label} · 排队中`;
-      row.append(summary);
-      results.append(row);
-      return { account, question, row, summary, label, status: 'queued' };
+    const apiMode = mode() === 'api';
+    const api = apiMode ? { baseUrl: find('api-url').value.trim(), key: find('api-key').value.trim(), protocol: find('protocol').value } : null;
+    if (apiMode) {
+      try { const url = new URL(api.baseUrl); if (!['http:', 'https:'].includes(url.protocol) || !api.key || url.username || url.password || url.hash || url.search) throw new Error(); }
+      catch { status.textContent = '请填写有效的 HTTP(S) API 地址和 API Key。'; return; }
+    }
+    const accounts = apiMode ? [null] : [...getEligibility().accounts];
+    if (!accounts.length) { status.textContent = '没有测活通过的账号，请先在格式转换中完成测活。'; return; }
+    const current = new AbortController(); controller = current;
+    const run = ++generation, ownsWorkspace = isWorkspaceCurrent();
+    const active = () => run === generation && ownsWorkspace() && !current.signal.aborted;
+    results.replaceChildren(); clearTimeout(previewTimer);
+    jobs = accounts.flatMap((account, index) => Object.keys(TITLES).map(question => {
+      const label = apiMode ? new URL(api.baseUrl).host : account.email || `账号 ${index + 1}`;
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'evaluation-task';
+      const title = document.createElement('strong'); title.textContent = TITLES[question];
+      const target = document.createElement('small'); target.textContent = label; target.title = label;
+      const stateLabel = document.createElement('span'); stateLabel.className = 'evaluation-task-status'; stateLabel.textContent = '排队中';
+      button.append(title, target, stateLabel); results.append(button);
+      return { account, question, label, model: chosenModel, status: 'queued', output: '', firstTokenMs: null, button, stateLabel };
     }));
+    jobs.forEach((job, index) => job.button.addEventListener('click', () => selectJob(index)));
+    find('queue-count').textContent = `${jobs.length} 项`;
+    selectJob(1); jobs.forEach(updateJob); refresh();
+    status.textContent = `正在测试 ${accounts.length} 个${apiMode ? 'API 接入' : '测活通过的账号'}，每次并行执行 2 题。`;
+    timer = setInterval(renderMetrics, 500);
     let cursor = 0;
-    status.textContent = `正在测试 ${accounts.length} 个账号 · ${chosenModel} · 0/${jobs.length}`;
-    await Promise.all(Array.from({ length: Math.min(2, jobs.length) }, async () => {
-      while (cursor < jobs.length && active()) {
-        const job = jobs[cursor++];
-        job.status = 'running';
-        job.summary.textContent = `${job.label} · 测试中`;
-        try {
-          const response = await request('/api/model-evaluation', {
-            method: 'POST', credentials: 'same-origin', signal: current.signal,
-            headers: getHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ account: job.account, model: chosenModel, question: job.question }),
-          });
-          const result = await response.json();
-          if (!response.ok || !result.ok) throw new Error(typeof result.error === 'string' ? result.error : `HTTP ${response.status}`);
-          if (!active()) return;
-          job.status = result.status;
-          job.summary.textContent = `${job.label} · ${STATUS[result.status] || result.status} · ${(result.durationMs / 1000).toFixed(1)}s`;
-          const output = document.createElement('pre');
-          output.textContent = result.output;
-          job.row.append(output);
-          if (job.question === 'pelican' && result.status === 'manual_review') {
-            const preview = document.createElement('button');
-            preview.type = 'button';
-            preview.className = 'button button-secondary';
-            preview.textContent = '预览鹈鹕动画';
-            preview.addEventListener('click', () => {
-              const frame = document.createElement('iframe');
-              frame.title = `${job.label} 动画预览`;
-              frame.setAttribute('sandbox', '');
-              frame.referrerPolicy = 'no-referrer';
-              // The injected policy blocks network access even for untrusted model HTML.
-              frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">${result.html}`;
-              preview.replaceWith(frame);
-            }, { once: true });
-            job.row.append(preview);
-          }
-        } catch (error) {
-          if (!active()) return;
-          job.status = 'error';
-          job.summary.textContent = `${job.label} · 请求失败`;
-          const message = document.createElement('p');
-          message.textContent = error.message;
-          job.row.append(message);
+    try {
+      await Promise.all(Array.from({ length: Math.min(2, jobs.length) }, async () => {
+        while (cursor < jobs.length && active()) {
+          const job = jobs[cursor++]; job.status = 'connecting'; job.startedAt = Date.now(); updateJob(job);
+          let complete = false;
+          try {
+            const response = await request('/api/model-evaluation', { method: 'POST', credentials: 'same-origin', signal: current.signal,
+              headers: getHeaders({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }),
+              body: JSON.stringify({ ...(apiMode ? { api } : { account: job.account }), model: chosenModel, question: job.question }) });
+            if (!response.ok) {
+              const error = await response.json().catch(() => ({}));
+              throw new Error(typeof error.error === 'string' ? error.error : `HTTP ${response.status}`);
+            }
+            await readEvaluationEvents(response.body, data => {
+              if (!active()) return;
+              if (data.type === 'phase' && ACTIVE.includes(data.phase)) job.status = data.phase;
+              if (data.type === 'delta') { job.status = 'generating'; job.output += data.delta || ''; job.firstTokenMs ??= data.firstTokenMs ?? Date.now() - job.startedAt; }
+              if (data.type === 'complete') {
+                if (!['passed', 'wrong_answer', 'invalid_format', 'manual_review'].includes(data.status)) throw new Error('测试结果状态无效');
+                Object.assign(job, { status: data.status, output: data.output || job.output, firstTokenMs: data.firstTokenMs ?? job.firstTokenMs, durationMs: data.durationMs, outputTokens: data.outputTokens });
+                complete = true;
+              }
+              if (data.type === 'error') throw new Error(data.error || '模型请求失败');
+              updateJob(job);
+            });
+            if (!complete && active()) throw new Error('连接已结束，但模型未完成输出。已保留部分内容。');
+          } catch (error) {
+            if (run !== generation || !ownsWorkspace()) return;
+            job.status = current.signal.aborted ? 'cancelled' : 'error'; job.error = current.signal.aborted ? '' : error.message;
+            job.durationMs = Date.now() - job.startedAt; updateJob(job);
+          } finally { job.account = null; }
         }
-        done++;
-        if (active()) status.textContent = `测试进度 ${done}/${jobs.length} · ${chosenModel}`;
-      }
-    }));
-    if (run !== generation) return;
-    for (const job of jobs) {
-      if (['queued', 'running'].includes(job.status)) {
-        job.status = 'cancelled';
-        job.summary.textContent = `${job.label} · 已停止`;
+      }));
+    } finally {
+      if (run === generation) {
+        clearInterval(timer);
+        jobs.forEach(job => {
+          if (ACTIVE.includes(job.status)) { job.status = 'cancelled'; job.durationMs = job.startedAt ? Date.now() - job.startedAt : 0; }
+          job.account = null; updateJob(job);
+        });
+        const count = state => jobs.filter(job => job.status === state).length;
+        status.textContent = `${current.signal.aborted ? '已停止' : '测试完成'}：答案正确 ${count('passed')}，待评审 ${count('manual_review')}，失败 ${count('error') + count('wrong_answer') + count('invalid_format')}${count('cancelled') ? `，已停止 ${count('cancelled')}` : ''}。`;
+        controller = null; refresh(); renderSelected(true);
       }
     }
-    status.textContent = `${current.signal.aborted ? '已停止' : '测试完成'}：${done}/${jobs.length} · 答案正确 ${jobs.filter(j => j.status === 'passed').length} · 待评审 ${jobs.filter(j => j.status === 'manual_review').length} · 失败 ${jobs.filter(j => ['error', 'wrong_answer', 'invalid_format'].includes(j.status)).length} · ${chosenModel}`;
-    controller = null;
-    stop.disabled = true;
-    model.disabled = false;
-    refresh();
   });
+  refresh();
   return { reset, refresh };
 }

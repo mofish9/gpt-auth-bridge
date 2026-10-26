@@ -25,6 +25,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     "sub2api-tools": "sub2api 工具",
     "protocol-login": "协议登录 / RT",
     "team-checkout": "生成Team长链接",
+    "model-evaluation": "模型测试",
   };
 
   const createWorkspaceState = () => ({
@@ -93,6 +94,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   let selfLeaveBusy = false;
   let protocolLogoutBusy = false;
   let healthController;
+  let evaluationEligibility = { accounts: [], total: 0, pending: false };
 
   let browserStorageReady = false;
   let browserStorageAvailable = false;
@@ -1601,6 +1603,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     const isCurrent = workspaceTaskIsCurrent(controller.signal);
     const run = state.healthRun;
     state.health = [];
+    evaluationEligibility = { accounts: [], total: state.converted.length, pending: state.converted.length > 0 };
     resetLogoutAllSessions();
     renderHealth();
     updateOutput();
@@ -1623,6 +1626,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       if (!isCurrent() || run !== state.healthRun) return;
       state.health = Array.isArray(payload.results) ? payload.results : [];
       if (!healthComplete()) throw new Error("测活接口返回结果不完整");
+      evaluationEligibility = { total: state.converted.length, pending: false,
+        accounts: state.converted.filter((_, index) => state.health[index]?.status === 200).map(item => ({
+          email: item.cpa.email, accessToken: item.cpa.access_token, accountId: item.cpa.account_id,
+        })) };
       const ok = state.health.filter((item) => item.status === 200).length;
       const failed = state.health.filter((item) => item.status == null).length;
       const forbidden = state.health.filter((item) => item.status === 403).length;
@@ -1632,6 +1639,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     } catch (error) {
       if (!isCurrent() || run !== state.healthRun) return;
       state.health = [];
+      evaluationEligibility = { accounts: [], total: state.converted.length, pending: false };
       renderHealth();
       updateOutput();
       setStatus(elements.healthStatus, `自动测活失败：${error instanceof Error ? error.message : String(error)}`, "error");
@@ -1784,7 +1792,6 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
 
   function updateOutput() {
     modelEvaluation.refresh();
-    document.querySelector('#model-evaluation').hidden = ['sub2api-tools', 'protocol-login', 'team-checkout'].includes(state.format);
     updatePushControls();
     persistBrowserWorkspace();
     const isTool = state.format === "sub2api-tools";
@@ -1867,6 +1874,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function scheduleConvert() {
+    evaluationEligibility = { accounts: [], total: 0, pending: false };
     modelEvaluation.reset();
     cancelHealthCheck();
     const text = elements.input.value;
@@ -3869,6 +3877,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       const isConverterGroup = item.dataset.formatGroup === "converter"
         && state.format !== "sub2api-tools"
         && state.format !== "protocol-login"
+        && state.format !== "model-evaluation"
         && state.format !== "team-checkout";
       item.setAttribute("aria-pressed", String(item.dataset.format === state.format || isConverterGroup));
     });
@@ -3876,9 +3885,14 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     const isTool = state.format === "sub2api-tools";
     const isLogin = state.format === "protocol-login";
     const isTeamCheckout = state.format === "team-checkout";
+    const isEvaluation = state.format === 'model-evaluation';
+    document.body.classList.toggle('is-model-evaluation', isEvaluation);
+    document.querySelector('#model-evaluation').classList.toggle('hidden', !isEvaluation);
+    document.querySelector('#model-evaluation').setAttribute('aria-hidden', String(!isEvaluation));
+    modelEvaluation.refresh();
     document.body.classList.toggle('is-team-checkout', isTeamCheckout);
     teamCheckout.refresh();
-    const isDedicatedPage = isLogin || isTeamCheckout;
+    const isDedicatedPage = isLogin || isTeamCheckout || isEvaluation;
     document.querySelector('#team-checkout-workbench').classList.toggle('hidden', !isTeamCheckout);
     document.querySelector('#team-checkout-workbench').setAttribute('aria-hidden', String(!isTeamCheckout));
     const isSub2apiOutput = state.format === "sub2api" || isTool;
@@ -3927,13 +3941,18 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   const teamCheckout = initializeTeamCheckout({ request: pageFetch, isWorkspaceCurrent: workspaceTaskIsCurrent });
   const modelEvaluation = initializeModelEvaluation({
     request: pageFetch, isWorkspaceCurrent: workspaceTaskIsCurrent, getHeaders: loginProxyHeaders,
-    getAccounts: () => ['sub2api-tools', 'protocol-login', 'team-checkout'].includes(state.format) ? [] : state.converted.map(item => ({
-      email: item.cpa.email, accessToken: item.cpa.access_token, accountId: item.cpa.account_id,
-    })),
+    getEligibility: () => evaluationEligibility,
+    onImport: () => selectFormat('sub2api'),
   });
   const selectFormat = (format) => {
+    const previous = state.format;
     state.format = format;
     updateToolControls();
+    if (format === 'model-evaluation' || (previous === 'model-evaluation' && ['sub2api', 'cpa', 'cockpit', 'codex'].includes(format))) {
+      updateOutput();
+      if (format === 'sub2api' && !evaluationEligibility.total && state.converted.length) startHealthCheck();
+      return;
+    }
     scheduleConvert();
     if (state.format === "protocol-login" && !state.loginSub2Loaded) {
       const isCurrent = workspaceTaskIsCurrent();
@@ -4242,6 +4261,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       node, value: node.value, checked: node.checked, disabled: node.disabled, type: node.type,
     }));
     const blockWorkspaceTasks = (release = false) => {
+      evaluationEligibility = { accounts: [], total: 0, pending: false };
       teamCheckout.reset();
       modelEvaluation.reset();
       cancelHealthCheck();

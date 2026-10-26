@@ -20,6 +20,7 @@
         </a>
         <nav class="top-nav" aria-label="主要功能">
           <button class="top-nav-item" type="button" data-format="sub2api" data-format-group="converter" aria-pressed="true">格式转换</button>
+          <button class="top-nav-item" id="model-evaluation-tab" type="button" data-format="model-evaluation" aria-pressed="false" aria-controls="model-evaluation">模型测试</button>
           <button class="top-nav-item" type="button" data-format="sub2api-tools" aria-pressed="false">批处理工具</button>
           <button class="top-nav-item" type="button" data-format="protocol-login" aria-pressed="false">协议登录</button>
           <button class="top-nav-item" type="button" data-format="team-checkout" aria-pressed="false" aria-controls="team-checkout-workbench">生成Team长链接</button>
@@ -101,6 +102,64 @@
           </select>
         </label>
       </div>
+
+      <section class="evaluation-workbench hidden" id="model-evaluation" aria-labelledby="model-evaluation-title">
+        <header class="evaluation-heading">
+          <div><h1 id="model-evaluation-title">模型测试</h1><p>从一道推理题，到一段会动的画面。实时查看模型的生成过程。</p></div>
+          <span class="evaluation-live-label"><span aria-hidden="true"></span>流式输出与实时预览</span>
+        </header>
+        <div class="evaluation-layout">
+          <aside class="evaluation-sidebar" aria-label="测试配置与队列">
+            <form id="evaluation-form" autocomplete="off">
+              <fieldset id="evaluation-fields">
+                <legend>测试配置</legend>
+                <div class="evaluation-mode" aria-label="测试来源">
+                  <label><input type="radio" name="evaluation-source" value="accounts" checked /><span>测活账号</span></label>
+                  <label><input type="radio" name="evaluation-source" value="api" /><span>API 接入</span></label>
+                </div>
+                <div id="evaluation-accounts-source" class="evaluation-source">
+                  <p id="evaluation-account-count">暂无测活通过的账号</p>
+                  <small>仅测试格式转换中 HTTP 200 的账号，自动跳过失败和未测活账号。</small>
+                  <button type="button" class="evaluation-text-button" id="evaluation-import">前往格式转换导入账号</button>
+                </div>
+                <div id="evaluation-api-source" class="evaluation-source" hidden>
+                  <label for="evaluation-api-url">API 地址<input id="evaluation-api-url" type="url" placeholder="https://api.example.com/v1" maxlength="2048" spellcheck="false" /></label>
+                  <label for="evaluation-api-key">API Key<input id="evaluation-api-key" type="password" placeholder="输入 API Key" maxlength="32768" autocomplete="new-password" data-private="true" /></label>
+                  <label for="evaluation-protocol">接口类型<select id="evaluation-protocol"><option value="responses">Responses</option><option value="chat">Chat Completions</option></select></label>
+                  <small>支持基础地址或完整接口地址。Key 仅用于本次页面会话，不保存。</small>
+                </div>
+                <label for="evaluation-model">测试模型<input id="evaluation-model" list="evaluation-models" value="gpt-6-astra" maxlength="100" required spellcheck="false" /></label>
+                <datalist id="evaluation-models"><option value="gpt-6-astra"></option><option value="gpt-5.6-sol"></option><option value="gpt-5.6-terra"></option><option value="gpt-5.5"></option></datalist>
+                <div class="evaluation-question-summary"><span>本轮测试</span><strong>糖果题 <small>推理 / 答案 21</small></strong><strong>鹈鹕骑自行车 <small>SVG / 动画</small></strong></div>
+                <button class="button button-primary" type="submit" data-evaluation-start disabled>开始测试</button>
+              </fieldset>
+              <button class="button button-secondary evaluation-stop" type="button" data-evaluation-stop disabled>停止测试</button>
+            </form>
+            <div class="evaluation-queue-heading"><h2>任务队列</h2><span id="evaluation-queue-count">0 项</span></div>
+            <div data-evaluation-results class="evaluation-queue"><p class="evaluation-queue-empty">开始后，点击任务查看生成过程。</p></div>
+          </aside>
+          <div class="evaluation-stage">
+            <section class="evaluation-run-status" aria-label="本轮进度">
+              <div><p role="status" aria-live="polite" id="evaluation-status">准备就绪，选择测试来源后开始。</p><span id="evaluation-progress-count">0 / 0</span></div>
+              <progress id="evaluation-progress" max="1" value="0" aria-label="测试完成进度"></progress>
+            </section>
+            <article class="evaluation-viewer" aria-label="当前任务详情">
+              <header class="evaluation-viewer-heading"><div><h2 id="evaluation-case-title">鹈鹕骑自行车</h2><p id="evaluation-case-target">生成内容将在这里逐步呈现</p></div><span id="evaluation-case-status" class="evaluation-badge">等待开始</span></header>
+              <ol class="evaluation-steps" aria-label="生成阶段"><li data-phase="queued">排队</li><li data-phase="connecting">连接模型</li><li data-phase="waiting">等待首字</li><li data-phase="generating">生成中</li><li data-phase="complete">完成</li></ol>
+              <dl class="evaluation-metrics"><div><dt>耗时</dt><dd id="evaluation-elapsed">—</dd></div><div><dt>首字时间</dt><dd id="evaluation-first-token">—</dd></div><div><dt>已生成</dt><dd id="evaluation-chars">0 字符</dd></div><div><dt>输出 Token</dt><dd id="evaluation-tokens">—</dd></div></dl>
+              <div class="evaluation-view-tabs"><div role="tablist" aria-label="查看生成结果"><button type="button" role="tab" id="evaluation-preview-tab" aria-controls="evaluation-preview-pane" aria-selected="true">画面预览</button><button type="button" role="tab" id="evaluation-output-tab" aria-controls="evaluation-output-pane" aria-selected="false" tabindex="-1">生成内容</button></div><button type="button" class="evaluation-text-button" id="evaluation-enlarge" disabled>放大预览</button></div>
+              <div id="evaluation-preview-pane" role="tabpanel" aria-labelledby="evaluation-preview-tab">
+                <div class="evaluation-preview-surface" id="evaluation-preview-surface"><div class="evaluation-preview-empty" id="evaluation-preview-empty"><svg viewBox="0 0 180 100" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2"><circle cx="48" cy="70" r="22"/><circle cx="130" cy="70" r="22"/><path d="M48 70 72 35 95 70H48m24-35 58 35-18-48h-13M72 35h-14M89 24q-25-19-22-8t22 8m-5-4q11-30 29-10l23 5-24 5-9 20"/></g></svg><h3>让画面随着代码成形</h3><p>收到 HTML / SVG 后自动预览，生成期间持续更新。</p></div><iframe id="evaluation-preview-frame" title="鹈鹕动画实时预览" sandbox="" referrerpolicy="no-referrer" hidden></iframe></div>
+              </div>
+              <div id="evaluation-output-pane" role="tabpanel" aria-labelledby="evaluation-output-tab" hidden><pre id="evaluation-output">模型输出将在这里逐步显示。</pre></div>
+              <p id="evaluation-output-note" class="evaluation-output-note">鹈鹕题保留 CSS / SVG 动画，完成后由你评审画面质量。</p>
+              <p id="evaluation-case-error" class="evaluation-case-error" role="alert" hidden></p>
+              <details class="evaluation-prompt"><summary>测试题说明</summary><p id="evaluation-prompt-text">鹈鹕题要求输出独立 HTML，以 SVG 和 CSS / SMIL 绘制循环骑车动画。糖果题沿用参考项目的摸馒头题，预期答案为 21。</p></details>
+            </article>
+          </div>
+        </div>
+        <dialog id="evaluation-preview-dialog" class="evaluation-preview-dialog" aria-labelledby="evaluation-dialog-title"><header><h2 id="evaluation-dialog-title">鹈鹕动画预览</h2><button type="button" class="button button-secondary" id="evaluation-close-preview">关闭预览</button></header><div class="evaluation-preview-surface"><iframe id="evaluation-large-frame" title="放大鹈鹕动画" sandbox="" referrerpolicy="no-referrer"></iframe></div></dialog>
+      </section>
 
       <section class="team-checkout-workbench hidden" id="team-checkout-workbench" aria-labelledby="team-checkout-title">
         <div class="team-checkout-layout">
@@ -430,17 +489,6 @@
               </div>
             </div>
             <div class="status-line" id="health-status">等待自动测活。</div>
-            <section class="model-evaluation" id="model-evaluation" aria-label="批量模型测试">
-              <div class="actions">
-                <label for="evaluation-model">测试模型</label>
-                <input id="evaluation-model" list="evaluation-models" value="gpt-6-astra" maxlength="100" aria-label="选择或输入测试模型" />
-                <datalist id="evaluation-models"><option value="gpt-6-astra"></option><option value="gpt-5.6-sol"></option><option value="gpt-5.6-terra"></option><option value="gpt-5.5"></option></datalist>
-                <button class="button button-secondary" type="button" data-evaluation-start disabled>批量测试糖果题和鹈鹕题</button>
-                <button class="button button-secondary" type="button" data-evaluation-stop disabled>停止测试</button>
-              </div>
-              <p role="status" aria-live="polite">每个转换账号测试两题；糖果题沿用参考项目的摸馒头题，预期答案 21。</p>
-              <div data-evaluation-results></div>
-            </section>
             <pre class="logout-progress hidden" id="logout-progress" aria-live="polite"></pre>
              <div class="accounts health-table" id="health-table" aria-label="测活账号列表"><table><thead><tr><th scope="col">名称</th><th scope="col">邮箱</th><th scope="col">状态</th><th scope="col">5 小时</th><th scope="col">7 天</th><th scope="col" title="当前登录设备列表中的设备数量，不代表设备实时联网状态">在线设备</th><th scope="col" title="Plus 零元试用资格，国家跟随代理出口">零元试用</th><th scope="col" title="基于当前登录设备：最早会话创建时间、最近登录时间；非账号完整历史">登录时间（最早 / 最近）</th></tr></thead><tbody id="health-body"><tr><td colspan="8" class="empty">等待测活。</td></tr></tbody></table></div>
             <div class="accounts account-preview hidden" aria-label="账号预览">

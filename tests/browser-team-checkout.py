@@ -47,7 +47,7 @@ def main():
                 page.wait_for_load_state('networkidle')
                 expect(page.locator('#browser-storage-status')).to_contain_text('此浏览器')
                 nav = page.locator('.top-nav [data-format]')
-                assert nav.evaluate_all('(nodes) => nodes.map(node => node.dataset.format)') == ['sub2api', 'sub2api-tools', 'protocol-login', 'team-checkout']
+                assert nav.evaluate_all('(nodes) => nodes.map(node => node.dataset.format)') == ['sub2api', 'model-evaluation', 'sub2api-tools', 'protocol-login', 'team-checkout']
                 page.locator('.top-nav [data-format="team-checkout"]').click()
                 expect(page.locator('#team-checkout-workbench')).to_be_visible()
                 expect(page.locator('#converter-workspace')).to_be_hidden()
