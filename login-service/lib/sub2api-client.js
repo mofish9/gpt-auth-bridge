@@ -6,6 +6,17 @@ function sameModelMapping(expected, actual) {
     && Object.entries(expected).every(([key, value]) => Object.hasOwn(actual, key) && actual[key] === value);
 }
 
+function accountStateRecovered(account) {
+  const now = Date.now();
+  const future = value => value != null && new Date(value).getTime() > now;
+  return account?.status === 'active' && account.schedulable === true && !account.error_message
+    && !['temp_unschedulable_until', 'rate_limit_reset_at', 'overload_until'].some(field => future(account[field]));
+}
+
+function accountCredentialsMatch(expected, actual) {
+  return ['access_token', 'refresh_token', 'id_token'].every(field => !expected.credentials[field] || actual?.credentials?.[field] === expected.credentials[field]);
+}
+
 export class Sub2ApiError extends Error {
   constructor(message, { status = 0, body = null } = {}) {
     super(message);
@@ -152,34 +163,57 @@ export class Sub2ApiClient {
     });
   }
 
-  async reconcileAccount(account, groupIds, { credentialsOnly = false } = {}) {
+  async reconcileAccount(account, groupIds, { credentialsOnly = false, recoverState = false } = {}) {
     const matches = await this.matchingAccounts(account, groupIds);
     if (!matches.length) return { status: 'failed', retryable: true, code: 'REMOTE_NOT_FOUND', error: '已确认所选分组中不存在该账号，可以重试' };
     if (matches.length > 1) return { status: 'unknown', retryable: false, code: 'REMOTE_AMBIGUOUS', error: '目标分组存在重复账号，请先在目标服务核对' };
     const row = matches[0];
-    const tokenFields = ['access_token', 'refresh_token', 'id_token'];
-    const matchesCredentials = tokenFields.every(field => !account.credentials[field] || row.credentials?.[field] === account.credentials[field]);
+    const matchesCredentials = accountCredentialsMatch(account, row);
     const matchesProxy = !Object.hasOwn(account, 'proxy_id') || Number(row.proxy_id) === Number(account.proxy_id);
     const matchesSettings = credentialsOnly || (['concurrency', 'priority', 'load_factor'].every(field =>
       !Object.hasOwn(account, field) || row[field] === account[field])
       && (!Object.hasOwn(account.credentials, 'model_mapping') || sameModelMapping(account.credentials.model_mapping, row.credentials?.model_mapping))
       && (!Object.hasOwn(account.extra || {}, 'codex_fingerprint_mode') || row.extra?.codex_fingerprint_mode === account.extra.codex_fingerprint_mode));
+    if (matchesCredentials && matchesProxy && recoverState && !accountStateRecovered(row)) {
+      return { status: 'failed', retryable: true, code: 'REMOTE_RECOVERY_INCOMPLETE', error: '凭据已更新，但账号错误状态或调度尚未恢复，可重试恢复' };
+    }
     if (matchesCredentials && matchesProxy && matchesSettings) return { status: 'success', retryable: false, code: 'REMOTE_CONFIRMED' };
     if (matchesCredentials && matchesProxy && !matchesSettings) return { status: 'unknown', retryable: false, code: 'REMOTE_SETTINGS_UNCONFIRMED', error: '目标账号已存在，但账号参数与此次推送不一致，请在目标服务核对' };
     return { status: 'unknown', retryable: false, code: 'REMOTE_VERSION_UNCONFIRMED', error: '目标账号已存在，但无法确认是此次推送的凭据，请在目标服务核对' };
   }
 
-  async upsertAccount(account, groupIds) {
+  async upsertAccount(account, groupIds, { recoverState = false } = {}) {
     const matches = await this.matchingAccounts(account, groupIds);
     if (matches.length > 1) throw new Sub2ApiError('目标分组存在重复账号，请先合并后重试', { status: 409 });
     if (matches.length === 1) {
       const row = matches[0];
       if (!Number.isSafeInteger(row.id) || row.id < 1) throw new Sub2ApiError('远端账号 ID 无效');
-      // Preserve routing, grouping, scheduling and operator settings on existing accounts.
+      // Preserve operator settings; only successful monitor re-login opts into state recovery.
       const fields = ['access_token', 'refresh_token', 'id_token', 'chatgpt_account_id', 'account_id', 'chatgpt_user_id', 'email', 'expires_at', 'expires_in', 'organization_id', 'plan_type'];
       const refreshed = Object.fromEntries(fields.filter(key => Object.hasOwn(account.credentials, key)).map(key => [key, account.credentials[key]]));
       await this.request('PUT', `accounts/${row.id}`, { credentials: { ...row.credentials, ...refreshed },
         ...(Object.hasOwn(account, 'proxy_id') ? { proxy_id: account.proxy_id } : {}) });
+      if (recoverState) {
+        try {
+          // ClearError also invalidates the OAuth token cache. The separate
+          // temp-unschedulable endpoint removes the cached 401 cooldown too.
+          await this.request('POST', `accounts/${row.id}/clear-error`);
+          await this.request('DELETE', `accounts/${row.id}/temp-unschedulable`);
+          await this.request('POST', `accounts/${row.id}/schedulable`, { schedulable: true });
+          const restored = await this.request('GET', `accounts/${row.id}`);
+          if (restored?.id !== row.id || !accountCredentialsMatch(account, restored)
+            || (Object.hasOwn(account, 'proxy_id') && Number(restored.proxy_id) !== Number(account.proxy_id))) {
+            throw new Sub2ApiError('恢复后的账号凭据或代理尚未确认');
+          }
+          if (!accountStateRecovered(restored)) {
+            throw Object.assign(new Sub2ApiError('账号状态恢复未完成'), { code: 'REMOTE_RECOVERY_INCOMPLETE' });
+          }
+          Object.assign(row, restored);
+        } catch (error) {
+          error.recoveryPending = true;
+          throw error;
+        }
+      }
       return { success: true };
     }
     const data = await this.importAccounts([account], groupIds);

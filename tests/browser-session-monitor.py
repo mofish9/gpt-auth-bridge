@@ -13,6 +13,7 @@ def token(name, plan='plus'):
 
 def check_session_monitor(browser, url):
     check_monitor_config_gate(browser, url)
+    check_monitor_recovery_retry(browser, url)
     for target in ['sub2api', 'cpa']:
         context = browser.new_context()
         calls, errors = [], []
@@ -65,6 +66,7 @@ def check_session_monitor(browser, url):
                 route.fulfill(json={'ok': True, 'accounts': accounts})
             elif path == 'push/' + target:
                 assert body['upsert'] is True
+                assert body['recoverState'] is True
                 assert len(body['accounts']) == 2  # Free stays downloadable, but isn't pushed.
                 route.fulfill(json={'ok': True, 'imported': 2, 'failed': 0, 'results': [{'index': index, 'name': 'fixture', 'status': 'success'} for index in range(2)]})
             else:
@@ -262,6 +264,54 @@ def check_session_monitor(browser, url):
         finally:
             context.close()
     print('Browser monitor: opt-in, minute scheduling, isolated browser leases and takeover, terminal credential skips, multi-tab exclusion, persisted backoff and clear cancellation: PASS')
+
+
+def check_monitor_recovery_retry(browser, url):
+    context = browser.new_context()
+    page = context.new_page()
+    calls = []
+
+    def push_response(route):
+        body = route.request.post_data_json
+        assert body['upsert'] is True
+        assert body['recoverState'] is True
+        assert body['operationId'] == 'monitor-recovery-fixture'
+        reconcile = route.request.url.endswith('/reconcile')
+        calls.append('reconcile' if reconcile else 'retry')
+        route.fulfill(json={
+            'schemaVersion': '1.0.0', 'operationId': body['operationId'], 'requestId': 'fixture-request',
+            'ok': not reconcile, 'imported': 0 if reconcile else 1, 'failed': 1 if reconcile else 0, 'unknown': 0,
+            'results': [{'index': 0, 'itemId': body['itemIds'][0], 'name': 'fixture',
+                         'status': 'failed' if reconcile else 'success', 'retryable': reconcile,
+                         'error': '凭据已更新，但账号调度尚未恢复' if reconcile else ''}],
+        })
+
+    context.route('**/api/push/sub2api', push_response)
+    context.route('**/api/push/sub2api/reconcile', push_response)
+    try:
+        page.goto(url)
+        page.evaluate('''async () => {
+            const account = {name:'recovery@example.com', platform:'openai', type:'oauth',
+                credentials:{email:'recovery@example.com', chatgpt_account_id:'personal',
+                    access_token:'fixture-access', refresh_token:'fixture-rt'}};
+            await browserWorkspace.save({state:{format:'protocol-login',
+                browserSettings:{sub2apiSettings:{baseUrl:'https://sub2.fixture',adminApiKey:'fixture-key',groupIds:[7]}},
+                activePushOperationId:'monitor-recovery-fixture', pushOperations:[{
+                    operationId:'monitor-recovery-fixture',target:'sub2api',baseUrl:'https://sub2.fixture',groupIds:[7],
+                    proxyId:'',upsert:true,recoverState:true,items:[{
+                        itemId:'personal',name:account.name,account,status:'unknown',retryable:false}]}]},
+                fields:[{name:'push-target',value:'sub2api',type:'radio',checked:true}]});
+        }''')
+        page.reload()
+        page.locator('#reconcile-push').click()
+        expect(page.locator('#push-status')).to_contain_text('可重试 1')
+        page.reload()
+        page.locator('#retry-push').click()
+        expect(page.locator('#push-status')).to_contain_text('成功 1，失败 0')
+        assert calls == ['reconcile', 'retry']
+        assert page.evaluate('async () => (await browserWorkspace.read()).state.pushOperations[0].recoverState') is True
+    finally:
+        context.close()
 
 
 def check_monitor_config_gate(browser, url):

@@ -100,3 +100,11 @@ test('successful push history keeps fifty metadata records while preserving ever
   assert.equal(original.state.pushOperations[0].items[0].status, 'pending', 'Compaction is pure');
   assert.equal(original.state.pushOperations.at(-1).items[0].account.credentials.access_token, 'discard-57');
 });
+
+test('monitor revival history survives browser snapshot restore', () => {
+  const monitorRevivalHistory = {
+    'account-1': [{ at: 1780000000000, push: 'success' }, { at: 1780000060000, push: 'failed' }],
+  };
+  const saved = serialize({ state: { monitorRevivalHistory } });
+  assert.deepEqual(plain(restore(saved).state.monitorRevivalHistory), monitorRevivalHistory);
+});

@@ -81,6 +81,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     monitorEnabled: false,
     monitorOwner: '',
     monitorStopped: {},
+    monitorRevivalHistory: {},
   });
   const state = createWorkspaceState();
   let pushBusy = false;
@@ -130,6 +131,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       state.browserSettings[key] = { ...state.browserSettings[key], ...value };
     }
     if (snapshot.settings?.sub2apiSettings) restoreSub2apiAccountConfig();
+    renderSavedAccounts();
     // Credentials are a durable boundary even when they arrive as a partial SSE
     // snapshot. The caller waits before displaying completion or sending work.
     return persistBrowserWorkspace(true, true);
@@ -245,6 +247,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     loginCompletedCount: document.querySelector("#login-completed-count"),
     loginOverallPercent: document.querySelector("#login-overall-percent"),
     loginOverallBar: document.querySelector("#login-overall-bar"),
+    savedAccountsCount: document.querySelector("#saved-accounts-count"),
+    savedAccountsSearch: document.querySelector("#saved-accounts-search"),
+    savedAccountsFilter: document.querySelector("#saved-accounts-filter"),
+    savedAccountsBody: document.querySelector("#saved-accounts-body"),
+    savedAccountsStatus: document.querySelector("#saved-accounts-status"),
     startProtocolLogin: document.querySelector("#start-protocol-login"),
     exportLoginSessions: document.querySelector("#export-login-sessions"),
     exportLoginPersonal: document.querySelector("#export-login-personal"),
@@ -285,6 +292,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     loginSub2Priority: document.querySelector("#login-sub2-priority"),
     loginSub2LoadFactor: document.querySelector("#login-sub2-load-factor"),
     loginSub2FingerprintMode: document.querySelector("#login-sub2-fingerprint-mode"),
+    loginSub2ExpiresAt: document.querySelector("#login-sub2-expires-at"),
+    loginSub2ImageBridgeStrategy: document.querySelector("#login-sub2-image-bridge-strategy"),
+    loginSub2WsMode: document.querySelector("#login-sub2-ws-mode"),
+    loginSub2AutoPauseOnExpired: document.querySelector("#login-sub2-auto-pause-on-expired"),
     loginSub2Models: document.querySelector("#login-sub2-models"),
     loginSub2Status: document.querySelector("#login-sub2-status"),
     loadLoginSub2Groups: document.querySelector("#load-login-sub2-groups"),
@@ -324,6 +335,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     sub2apiLoadFactor: document.querySelector("#sub2api-load-factor"),
     sub2apiPriority: document.querySelector("#sub2api-priority"),
     sub2apiFingerprintMode: document.querySelector("#sub2api-fingerprint-mode"),
+    sub2apiExpiresAt: document.querySelector("#sub2api-expires-at"),
+    sub2apiImageBridgeStrategy: document.querySelector("#sub2api-image-bridge-strategy"),
+    sub2apiWsMode: document.querySelector("#sub2api-ws-mode"),
+    sub2apiAutoPauseOnExpired: document.querySelector("#sub2api-auto-pause-on-expired"),
     sub2apiToolConfig: document.querySelector("#sub2api-tool-config"),
     splitScope: document.querySelector("#split-scope"),
     splitScopeLabel: document.querySelector("#split-scope-label"),
@@ -882,20 +897,56 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
 
   function applySub2apiOutputConfig(account) {
     const settings = normalizeSub2apiAccountConfig(state.browserSettings.sub2apiSettings);
+    const shouldSetAutoPause = settings.autoPauseOnExpired === false
+      || Object.prototype.hasOwnProperty.call(account || {}, 'auto_pause_on_expired')
+      || settings.expiresAt != null;
+    const extra = { ...(account?.extra || {}) };
+    if (settings.imageBridgeStrategy === 'inherit') {
+      delete extra.codex_image_generation_bridge;
+      delete extra.codex_image_generation_explicit_tool_policy;
+    } else if (settings.imageBridgeStrategy === 'enabled') {
+      extra.codex_image_generation_bridge = true;
+      delete extra.codex_image_generation_explicit_tool_policy;
+    } else if (settings.imageBridgeStrategy === 'disabled') {
+      extra.codex_image_generation_bridge = false;
+      delete extra.codex_image_generation_explicit_tool_policy;
+    } else if (settings.imageBridgeStrategy === 'strip') {
+      delete extra.codex_image_generation_bridge;
+      extra.codex_image_generation_explicit_tool_policy = 'strip';
+    }
+    extra.openai_oauth_responses_websockets_v2_mode = settings.wsMode;
     return {
       ...account,
       concurrency: settings.accountConcurrency,
       load_factor: settings.loadFactor,
       priority: settings.priority,
+      ...(shouldSetAutoPause ? { auto_pause_on_expired: settings.autoPauseOnExpired } : {}),
+      ...(settings.expiresAt != null ? { expires_at: settings.expiresAt } : {}),
       credentials: {
         ...(account?.credentials || {}),
         model_mapping: Object.fromEntries(settings.models.map((model) => [model, model])),
       },
-      extra: {
-        ...(account?.extra || {}),
-        codex_fingerprint_mode: settings.fingerprintMode,
-      },
+      extra: { ...extra, codex_fingerprint_mode: settings.fingerprintMode },
     };
+  }
+
+  function browserAccountForSub2api(account) {
+    const email = String(account?.credentials?.email || account?.email || '').trim().toLowerCase();
+    const accountId = String(account?.credentials?.chatgpt_account_id || account?.credentials?.account_id || '').trim();
+    return state.browserAccounts.find(candidate => {
+      if (email && String(candidate?.email || '').trim().toLowerCase() !== email) return false;
+      const candidateIds = [candidate?.openai_account_id, candidate?.business_openai_account_id].map(value => String(value || '').trim()).filter(Boolean);
+      return !accountId || !candidateIds.length || candidateIds.includes(accountId);
+    }) || null;
+  }
+
+  function protocolAccountInputNotes(account) {
+    const local = browserAccountForSub2api(account);
+    const raw = String(local?.raw || '').trim();
+    if (raw) return raw;
+    const values = [local?.email || account?.credentials?.email, local?.openai_password || local?.password, local?.two_factor_secret || local?.twoFactorSecret]
+      .map(value => String(value || '').trim());
+    return values.every(Boolean) ? values.join('----') : '';
   }
 
   function extractEmails(value) {
@@ -1831,6 +1882,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     if (elements.downloadScope.parentElement) elements.downloadScope.parentElement.style.display = "";
 
     renderAccounts();
+    renderSavedAccounts();
     renderHealth();
     renderIssues();
     syncLogoutAllSessionsButton();
@@ -1842,6 +1894,164 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     } else {
       setStatus(elements.outputStatus, "暂无输出。", state.skipped.length ? "error" : "");
     }
+  }
+
+  function savedAccountBadge(text, tone = '') {
+    return `<span class="saved-account-badge${tone ? ` is-${tone}` : ''}">${escapeHtml(text)}</span>`;
+  }
+
+  function savedAccountBusinessRows(account) {
+    const rows = Array.isArray(account?.business_workspace_credentials) ? account.business_workspace_credentials : [];
+    return rows.filter(row => String(row?.refreshToken || row?.accessToken || '').trim());
+  }
+
+  function savedAccountAttention(account) {
+    const id = String(account?.id || '');
+    return Boolean(state.monitorStopped[id]
+      || state.monitorRetries[id]
+      || ['session_invalid', 'probe_failed', 'deactivated'].includes(String(account?.session_health || '').trim().toLowerCase())
+      || String(account?.business_join_status || '').toLowerCase() === 'failed'
+      || String(account?.last_error || '').trim());
+  }
+
+  function savedAccountLoginStatus(account) {
+    const health = String(account?.session_health || '').trim().toLowerCase();
+    if (health === 'session_invalid') return { text: '401 / Session 失效', tone: 'error' };
+    if (health === 'alive' || health === 'alive_refreshed') return { text: '登录有效', tone: 'ok' };
+    if (health === 'deactivated') return { text: '账号停用', tone: 'error' };
+    if (health === 'probe_failed') return { text: '网络/验证异常', tone: 'warn' };
+    if (health === 'relogin_failed') return { text: '重登失败', tone: 'error' };
+    if (String(account?.last_error || '').trim()) return { text: '登录异常', tone: 'warn' };
+    return { text: '未测活', tone: '' };
+  }
+
+  function savedAccountPush(account) {
+    const identity = pushAccountIdentity(account);
+    for (const operation of [...(state.pushOperations || [])].reverse()) {
+      for (const item of [...(operation.items || [])].reverse()) {
+        const itemIdentity = item.identity
+          ? `${item.identity.email || ''}:${item.identity.accountId || ''}`.toLowerCase()
+          : pushAccountIdentity(item.account);
+        if (itemIdentity !== identity) continue;
+        const target = operation.target === 'cpa' ? 'CPA' : 'Sub2API';
+        const labels = { success: '成功', failed: '失败', unknown: '待核对', pending: '处理中', inflight: '处理中' };
+        return { text: `${target} · ${labels[item.status] || '未知'}`, tone: item.status === 'success' ? 'ok' : item.status === 'failed' ? 'error' : 'warn' };
+      }
+    }
+    return { text: '未推送', tone: '' };
+  }
+
+  function savedAccountRevivals(account) {
+    const entries = state.monitorRevivalHistory?.[String(account?.id || '')];
+    return Array.isArray(entries) ? entries.filter(entry => Number.isFinite(Number(entry?.at)) && Number(entry.at) > 0) : [];
+  }
+
+  function savedAccountCopyValue(accountId, kind) {
+    const account = state.browserAccounts.find(item => String(item?.id || '') === String(accountId || ''));
+    if (!account) return { value: '', count: 0 };
+    if (kind === 'email') return { value: String(account.email || '').trim(), count: 1 };
+    if (kind === 'account') {
+      const values = [account.email, account.openai_password || account.password, account.two_factor_secret || account.twoFactorSecret]
+        .map(value => String(value || '').trim());
+      return values.every(Boolean) ? { value: values.join('----'), count: 1 } : { value: '', count: 0 };
+    }
+    if (kind === 'personal-rt') return { value: String(account.openai_rt || '').trim(), count: 1 };
+    if (kind === 'business-rt') {
+      const values = savedAccountBusinessRows(account).map(row => String(row?.refreshToken || '').trim()).filter(Boolean);
+      if (!values.length && String(account.business_openai_rt || '').trim()) values.push(String(account.business_openai_rt).trim());
+      return { value: values.join('\n'), count: values.length };
+    }
+    return { value: '', count: 0 };
+  }
+
+  async function copySavedAccountField(accountId, kind) {
+    const result = savedAccountCopyValue(accountId, kind);
+    if (!result.value) return;
+    try {
+      await navigator.clipboard.writeText(result.value);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = result.value;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.append(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
+    }
+    const labels = { email: '邮箱', account: '账号', 'personal-rt': '个人 RT', 'business-rt': 'Business RT' };
+    if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = `${labels[kind] || '内容'}已复制${kind === 'business-rt' && result.count > 1 ? `（${result.count} 个）` : ''}。完整内容不会显示在页面上。`;
+  }
+
+  function renderSavedAccounts() {
+    if (!elements.savedAccountsBody) return;
+    const accounts = Array.isArray(state.browserAccounts) ? state.browserAccounts : [];
+    const query = String(elements.savedAccountsSearch?.value || '').trim().toLowerCase();
+    const filter = String(elements.savedAccountsFilter?.value || 'all');
+    const matches = accounts.filter(account => {
+      const id = String(account?.id || '').toLowerCase();
+      const email = String(account?.email || '').toLowerCase();
+      if (query && !email.includes(query) && !id.includes(query)) return false;
+      const hasSession = Boolean(String(account?.session_access_token || '').trim());
+      const hasRt = Boolean(String(account?.openai_rt || '').trim());
+      const businessRows = savedAccountBusinessRows(account);
+      const hasBusiness = businessRows.length > 0 || Boolean(String(account?.business_openai_rt || '').trim());
+      if (filter === 'session' && !hasSession) return false;
+      if (filter === 'rt' && !hasRt) return false;
+      if (filter === 'business' && !hasBusiness) return false;
+      if (filter === 'attention' && !savedAccountAttention(account)) return false;
+      return true;
+    });
+
+    elements.savedAccountsCount.textContent = query || filter !== 'all' ? `${matches.length}/${accounts.length} 个账号` : `${accounts.length} 个账号`;
+    if (!matches.length) {
+      elements.savedAccountsBody.innerHTML = `<tr><td colspan="8" class="empty">${accounts.length ? '没有符合筛选条件的账号。' : '暂无已保存账号。'}</td></tr>`;
+      if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = accounts.length
+        ? '可调整搜索或筛选条件。凭据、Cookie 和完整 Token 不会显示。'
+        : '账号数据仅来自当前浏览器的加密工作区。';
+      return;
+    }
+
+    elements.savedAccountsBody.innerHTML = matches.map(account => {
+      const id = String(account.id || '');
+      const hasSession = Boolean(String(account.session_access_token || '').trim());
+      const hasRt = Boolean(String(account.openai_rt || '').trim());
+      const businessRows = savedAccountBusinessRows(account);
+      const businessCount = businessRows.length || (String(account.business_openai_rt || '').trim() ? 1 : 0);
+      const health = String(account.session_health || '').trim().toLowerCase();
+      const attention = savedAccountAttention(account);
+      const stopped = state.monitorStopped[id];
+      const retry = state.monitorRetries[id];
+      const loginStatus = savedAccountLoginStatus(account);
+      const healthText = stopped ? (monitorStopLabels[stopped] || '已暂停') : retry ? `待重试 ${Math.max(1, Math.ceil((Number(retry.after || 0) - Date.now()) / 60000))} 分钟` : health === 'alive' ? '正常' : health === 'session_invalid' ? 'Session 失效' : health === 'probe_failed' ? '网络/验证异常' : '未测活';
+      const healthTone = stopped || health === 'session_invalid' ? 'error' : retry || health === 'probe_failed' ? 'warn' : health === 'alive' ? 'ok' : '';
+      const businessText = businessCount ? `${businessCount} 个 RT` : String(account.business_join_status || '').toLowerCase() === 'failed' ? '失败' : '无';
+      const businessTone = String(account.business_join_status || '').toLowerCase() === 'failed' ? 'error' : businessCount ? 'ok' : '';
+      const push = savedAccountPush(account);
+      const revivals = savedAccountRevivals(account);
+      const latestRevival = revivals.at(-1);
+      const revivalCell = latestRevival ? `<details class="saved-account-revivals"><summary>${escapeHtml(formatLoginTime(latestRevival.at))} · ${revivals.length} 次</summary><ul>${revivals.slice().reverse().map(entry => `<li>${escapeHtml(formatLoginTime(entry.at))}${entry.push === 'success' ? ' · Sub2API 已推送' : entry.push === 'failed' ? ' · 推送失败' : entry.push === 'skipped' ? ' · 未推送' : ''}</li>`).join('')}</ul></details>` : savedAccountBadge('无');
+      const email = String(account.email || '').trim();
+      const accountInput = [account.email, account.openai_password || account.password, account.two_factor_secret || account.twoFactorSecret]
+        .map(value => String(value || '').trim());
+      const accountCopy = accountInput.every(Boolean)
+        ? `<button type="button" class="saved-account-copy saved-account-input-copy" data-saved-copy-kind="account" data-saved-account-id="${escapeHtml(id)}">复制账号</button>`
+        : savedAccountBadge('账号信息不完整');
+      const personalCopy = hasRt ? `<button type="button" class="saved-account-copy" data-saved-copy-kind="personal-rt" data-saved-account-id="${escapeHtml(id)}">复制 RT</button>` : savedAccountBadge('无');
+      const businessCopy = businessCount ? `<button type="button" class="saved-account-copy" data-saved-copy-kind="business-rt" data-saved-account-id="${escapeHtml(id)}">复制 RT${businessCount > 1 ? `（${businessCount}）` : ''}</button>` : savedAccountBadge(businessText, businessTone);
+      return `<tr>
+        <td><button type="button" class="saved-account-copy saved-account-email-copy" data-saved-copy-kind="email" data-saved-account-id="${escapeHtml(id)}" title="点击复制邮箱">${escapeHtml(email || '未知邮箱')}</button><div class="saved-account-id">ID ${escapeHtml(id.slice(0, 12) || '-')}</div>${accountCopy}</td>
+        <td>${savedAccountBadge(loginStatus.text, loginStatus.tone || (attention ? 'warn' : ''))}</td>
+        <td>${personalCopy}</td>
+        <td>${businessCopy}</td>
+        <td>${savedAccountBadge(healthText, healthTone)}</td>
+        <td>${savedAccountBadge(push.text, push.tone)}</td>
+        <td>${revivalCell}</td>
+        <td>${escapeHtml(formatLoginTime(account.updatedAt || account.createdAt) || '-')}</td>
+      </tr>`;
+    }).join('');
+    if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = '仅显示状态摘要；完整凭据仍保存在当前浏览器的加密工作区。';
   }
 
   function renderAccounts() {
@@ -2610,7 +2820,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
 
   function pushAccountIdentity(account) {
     const credentials = account?.credentials || account || {};
-    return `${credentials.email || account?.name || ''}:${credentials.chatgpt_account_id || credentials.account_id || account?.account_id || ''}`.toLowerCase();
+    return `${credentials.email || account?.name || account?.email || ''}:${credentials.chatgpt_account_id || credentials.account_id || account?.account_id || account?.openai_account_id || ''}`.toLowerCase();
   }
 
   function requirePushOperationSettings(operation, settings, target) {
@@ -2651,6 +2861,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       const payload = await remotePushRequest(`${target}/reconcile`, {
         operationId: operation.operationId, schemaVersion: OPERATION_SCHEMA_VERSION,
         itemIds: items.map(item => item.itemId), accounts: items.map(item => item.account), settings, upsert: operation.upsert === true,
+        recoverState: operation.recoverState === true,
       });
       requireCurrentWorkspace(isCurrent);
       applyPushOperationResults(operation, items, payload);
@@ -2665,7 +2876,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     }
   }
 
-  async function runPush(buildAccounts, { retry = false, emptyMessage = '', upsert = false, signal } = {}) {
+  async function runPush(buildAccounts, { retry = false, emptyMessage = '', upsert = false, recoverState = false, signal } = {}) {
     if (pushBusy || (monitorBusy && !signal)) return;
     hidePushToast();
     const isCurrent = workspaceTaskIsCurrent(signal);
@@ -2683,6 +2894,8 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         operation = activePushOperation();
         if (!operation) throw new Error('没有可重试的推送记录');
         requirePushOperationSettings(operation, settings, target);
+        upsert = operation.upsert === true;
+        recoverState = operation.recoverState === true;
         items = operation.items.filter(item => item.account && !item.disabled && item.status === 'failed' && item.retryable === true);
         accounts = items.map(item => item.account);
       } else accounts = await buildAccounts(target);
@@ -2709,7 +2922,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         }
         operation = {
           operationId: crypto.randomUUID(), target, baseUrl: settings.baseUrl,
-          groupIds: settings.groupIds, proxyId: settings.proxyId || '', upsert,
+          groupIds: settings.groupIds, proxyId: settings.proxyId || '', upsert, recoverState,
           startedAt: Date.now(), updatedAt: Date.now(),
           items: accounts.map((account, index) => ({ itemId: String(index), account: structuredClone(account),
             name: account.name || account.email || account.credentials?.email || `账号 ${index + 1}`, status: 'pending', retryable: false, attempts: 0 })),
@@ -2724,7 +2937,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       requireCurrentWorkspace(isCurrent);
       setStatus(elements.pushStatus, `正在推送 ${accounts.length} 个账号到 ${target === 'cpa' ? 'CPA' : 'Sub2API'}…`);
       submitted = true;
-      const result = await remotePushRequest(target, { settings, accounts, upsert,
+      const result = await remotePushRequest(target, { settings, accounts, upsert, recoverState,
         operationId: operation.operationId, schemaVersion: OPERATION_SCHEMA_VERSION, itemIds: items.map(item => item.itemId),
         ...(signal ? { monitorOwner: state.monitorOwner } : {}) }, signal);
       requireCurrentWorkspace(isCurrent);
@@ -2765,7 +2978,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         return plan && plan !== 'free';
       });
       return target === 'sub2api' ? accounts : accounts.map(account => convertSession(account).cpa);
-    }, { emptyMessage: '没有可推送的非 free 账号，已跳过自动推送。', upsert, signal });
+    }, { emptyMessage: '没有可推送的非 free 账号，已跳过自动推送。', upsert, recoverState: upsert, signal });
   }
 
   const monitorStopLabels = { account_unavailable: '账号已删除、停用或不存在', password_invalid: '密码错误', totp_invalid: '2FA 凭据错误', self_leave_pending: '自踢结果待确认', sessions_logged_out: '已主动退出全部会话，手动登录后恢复' };
@@ -2799,6 +3012,24 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     if (!monitorStopLabels[reason]) return;
     state.monitorStopped[id] = reason;
     delete state.monitorRetries[id];
+  }
+
+  function recordMonitorRevivals(ids, pushStatus = 'pending') {
+    const at = Date.now();
+    for (const rawId of ids || []) {
+      const id = String(rawId || '');
+      if (!id) continue;
+      const entries = Array.isArray(state.monitorRevivalHistory[id]) ? state.monitorRevivalHistory[id] : [];
+      entries.push({ at, push: pushStatus });
+      state.monitorRevivalHistory[id] = entries.slice(-20);
+    }
+  }
+
+  function updateMonitorRevivalPushStatus(ids, pushStatus) {
+    for (const rawId of ids || []) {
+      const entries = state.monitorRevivalHistory[String(rawId || '')];
+      if (Array.isArray(entries) && entries.length) entries[entries.length - 1].push = pushStatus;
+    }
   }
 
   function monitorEligibility() {
@@ -2918,6 +3149,15 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
           const probe = probeIds.length ? await loginIcloudRequest('/api/v2/accounts/session-probe', { ids: probeIds, ...network }, controller.signal) : { results: [] };
           requireCurrentWorkspace(isCurrent);
           const health = new Map(probe.results.map(row => [String(row.id), row]));
+          for (const row of probe.results || []) {
+            const cached = state.browserAccounts.find(account => String(account.id) === String(row.id));
+            if (!cached) continue;
+            cached.session_health = String(row.health || '').trim();
+            cached.session_health_checked_at = new Date().toISOString();
+            cached.session_health_detail = String(row.error || row.detail || '').slice(0, 500);
+          }
+          await persistBrowserWorkspace(true, true);
+          renderSavedAccounts();
           const invalid = accounts.filter(account => {
             const result = health.get(String(account.id));
             if (result?.health === 'deactivated') markMonitorStopped(account.id, 'account_unavailable');
@@ -2969,13 +3209,18 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
             const rtReady = pipelineRtIds(pipelineResults);
             refreshed = successful.length;
             for (const id of successful) delete state.monitorRetries[id];
+            recordMonitorRevivals(successful, rtReady.length ? 'pending' : 'skipped');
             state.loginLastIds = [...new Set([...state.loginLastIds, ...successful])];
             state.loginPersonalIds = [...new Set([...state.loginPersonalIds, ...pipelineResults.filter(row => row.personalOk).map(row => String(row.id))])];
             state.loginBusinessIds = [...new Set([...state.loginBusinessIds, ...pipelineResults.filter(row => Number(row.businessSuccess) > 0).map(row => String(row.id))])];
             state.loginSessionIds = state.browserAccounts.filter(account => account.session_access_token).map(account => String(account.id));
             await persistBrowserWorkspace(true, true);
             requireCurrentWorkspace(isCurrent);
-            if (rtReady.length) pushed = Boolean((await autoPushLoginResults({ ids: rtReady, upsert: true, signal: controller.signal }))?.ok);
+            if (rtReady.length) {
+              pushed = Boolean((await autoPushLoginResults({ ids: rtReady, upsert: true, signal: controller.signal }))?.ok);
+              updateMonitorRevivalPushStatus(successful, pushed ? 'success' : 'failed');
+            }
+            renderSavedAccounts();
           }
           requireCurrentWorkspace(isCurrent);
           const unknown = probe.results.filter(row => row.health === 'probe_failed').length;
@@ -3008,11 +3253,32 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   function sub2apiAccountConfigFields(source) {
     return source === 'login' ? {
       accountConcurrency: elements.loginSub2Concurrency, priority: elements.loginSub2Priority,
-      loadFactor: elements.loginSub2LoadFactor, fingerprintMode: elements.loginSub2FingerprintMode, models: elements.loginSub2Models,
+      loadFactor: elements.loginSub2LoadFactor, fingerprintMode: elements.loginSub2FingerprintMode,
+      expiresAt: elements.loginSub2ExpiresAt, imageBridgeStrategy: elements.loginSub2ImageBridgeStrategy,
+      wsMode: elements.loginSub2WsMode, autoPauseOnExpired: elements.loginSub2AutoPauseOnExpired,
+      models: elements.loginSub2Models,
     } : {
       accountConcurrency: elements.sub2apiConcurrency, priority: elements.sub2apiPriority,
-      loadFactor: elements.sub2apiLoadFactor, fingerprintMode: elements.sub2apiFingerprintMode, models: elements.sub2apiModels,
+      loadFactor: elements.sub2apiLoadFactor, fingerprintMode: elements.sub2apiFingerprintMode,
+      expiresAt: elements.sub2apiExpiresAt, imageBridgeStrategy: elements.sub2apiImageBridgeStrategy,
+      wsMode: elements.sub2apiWsMode, autoPauseOnExpired: elements.sub2apiAutoPauseOnExpired,
+      models: elements.sub2apiModels,
     };
+  }
+
+  function formatSub2apiDateTime(value) {
+    const timestamp = Number(value);
+    if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+    const date = new Date(timestamp * 1000);
+    const pad = item => String(item).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  function parseSub2apiDateTime(value) {
+    const text = String(value || '').trim();
+    if (!text) return null;
+    const timestamp = new Date(text).getTime();
+    return Number.isFinite(timestamp) ? Math.trunc(timestamp / 1000) : null;
   }
 
   function readSub2apiAccountConfig(source) {
@@ -3021,6 +3287,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       accountConcurrency: Number(fields.accountConcurrency.value || 50),
       priority: Number(fields.priority.value || 1), loadFactor: Number(fields.loadFactor.value || 1000),
       fingerprintMode: fields.fingerprintMode.value || 'session',
+      expiresAt: parseSub2apiDateTime(fields.expiresAt?.value),
+      imageBridgeStrategy: fields.imageBridgeStrategy?.value || 'inherit',
+      wsMode: fields.wsMode?.value || 'off',
+      autoPauseOnExpired: fields.autoPauseOnExpired?.checked !== false,
       models: fields.models.value.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean),
     };
   }
@@ -3034,6 +3304,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       accountConcurrency: integer(settings.accountConcurrency, 50, 100), priority: integer(settings.priority, 1, 100),
       loadFactor: integer(settings.loadFactor, 1000, 10000),
       fingerprintMode: ['off', 'device', 'session', 'full'].includes(settings.fingerprintMode) ? settings.fingerprintMode : 'session',
+      expiresAt: Number.isFinite(Number(settings.expiresAt)) && Number(settings.expiresAt) > 0 ? Math.trunc(Number(settings.expiresAt)) : null,
+      imageBridgeStrategy: ['inherit', 'enabled', 'disabled', 'strip'].includes(settings.imageBridgeStrategy) ? settings.imageBridgeStrategy : 'inherit',
+      wsMode: ['off', 'ctx_pool', 'passthrough', 'http_bridge'].includes(settings.wsMode) ? settings.wsMode : 'off',
+      autoPauseOnExpired: settings.autoPauseOnExpired !== false,
       models: models.length ? models : ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra'],
     };
   }
@@ -3044,7 +3318,9 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     for (const source of ['output', 'login']) {
       for (const [key, field] of Object.entries(sub2apiAccountConfigFields(source))) {
         if (field === editingField) continue;
-        field.value = key === 'models' ? parameters.models.join(source === 'login' ? '\n' : ', ') : String(parameters[key]);
+        if (key === 'autoPauseOnExpired') field.checked = parameters.autoPauseOnExpired;
+        else if (key === 'expiresAt') field.value = formatSub2apiDateTime(parameters.expiresAt);
+        else field.value = key === 'models' ? parameters.models.join(source === 'login' ? '\n' : ', ') : String(parameters[key]);
       }
     }
   }
@@ -3085,7 +3361,9 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     elements.loginSub2GroupCount.textContent = `已选 ${selected.size} 个`;
     elements.loginSub2Groups.innerHTML = [...byId.values()].map(group => {
       const id = Number(group.id);
-      return `<label class="push-group-option"><input type="checkbox" data-sub2-group-id="${id}" ${selected.has(id) ? 'checked' : ''} /><span>${escapeHtml(group.name || `分组 ${id}`)}<small>ID ${id}${group.account_count !== undefined ? ` · ${Number(group.account_count)} 个账号` : ''}</small></span></label>`;
+      const platform = String(group.platform || '').trim();
+      const platformLabel = platform ? ` · ${platform}` : '';
+      return `<label class="push-group-option"><input type="checkbox" data-sub2-group-id="${id}" ${selected.has(id) ? 'checked' : ''} /><span>${escapeHtml(group.name || `分组 ${id}`)}<small>ID ${id}${escapeHtml(platformLabel)}${group.account_count !== undefined ? ` · ${Number(group.account_count)} 个账号` : ''}</small></span></label>`;
     }).join('') || '<p>填写地址和密钥后，读取可选分组。</p>';
   }
 
@@ -3210,7 +3488,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       version: source.version ?? 1,
       exported_at: source.exported_at || new Date().toISOString(),
       proxies: Array.isArray(source.proxies) ? source.proxies : [],
-      accounts: accounts.map(applySub2apiOutputConfig),
+      accounts: accounts.map(account => {
+        const configured = applySub2apiOutputConfig(account);
+        const notes = String(configured.notes || '').trim() || protocolAccountInputNotes(account);
+        return notes ? { ...configured, notes } : configured;
+      }),
     };
   }
 
@@ -3660,11 +3942,22 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       setLoginRetry(results, inputLines, workspaceMode);
       elements.exportLoginSessions.disabled = state.loginSessionIds.length === 0;
       updateLoginExportActions();
+      const exportIds = pipelineRtIds(results);
       if (selectedPushTarget() !== 'none' && workspaceMode !== "session") {
-        const exportIds = pipelineRtIds(results);
         await autoPushLoginResults({ ids: exportIds });
         if (!isCurrent()) return;
+      } else if (workspaceMode !== "session" && exportIds.length) {
+        // The RT pipeline is streamed, so its final summary does not carry the
+        // browser-owned credential snapshot. Refresh it once when no automatic
+        // push request will already do that for us.
+        try {
+          await loginIcloudRequest('/api/v2/accounts/export-sub2api', { ids: exportIds, rtKind: 'all', validateSession: false });
+        } catch {
+          // The login result remains valid; the next explicit export or page
+          // action can synchronize the browser-owned account snapshot.
+        }
       }
+      renderSavedAccounts();
       const retryCount = Number(state.loginRetry?.ids?.length || 0);
       setStatus(elements.loginStatus, `全部流程完成：成功 ${pipeline.success || 0}，失败 ${pipeline.failed || 0}，账号级并发 ${pipeline.concurrency || concurrency}。${retryCount ? `可再次点击“重试失败账号 (${retryCount})”。` : ''}`, pipeline.failed ? "error" : "ok");
       hideLoginModal();
@@ -4008,6 +4301,13 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     updateLoginExportActions();
     if (!state.loginProgress.size) elements.loginAccountCount.textContent = `${countLoginAccountLines()} 个账号`;
   });
+  elements.savedAccountsSearch?.addEventListener('input', renderSavedAccounts);
+  elements.savedAccountsFilter?.addEventListener('change', renderSavedAccounts);
+  elements.savedAccountsBody?.addEventListener('click', event => {
+    const button = event.target.closest('[data-saved-copy-kind]');
+    if (!button) return;
+    void copySavedAccountField(button.dataset.savedAccountId, button.dataset.savedCopyKind);
+  });
   elements.loginWorkspaceMode?.addEventListener("change", () => {
     if (state.loginRetry && state.loginRetry.workspaceMode !== getLoginWorkspaceMode()) clearLoginRetry();
     updateLoginExportActions();
@@ -4313,6 +4613,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       renderLogoutProgress();
       renderLoginSub2Groups();
       renderLoginProgress();
+      renderSavedAccounts();
       syncLoginProxyControls();
       updateLoginExportActions();
       updateToolControls();
@@ -4351,6 +4652,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         renderLoginProgress();
         restoreLoginProxySettings();
         renderAccounts();
+        renderSavedAccounts();
         renderHealth();
         elements.exportLoginSessions.disabled = state.loginSessionIds.length === 0;
         updateLoginExportActions();

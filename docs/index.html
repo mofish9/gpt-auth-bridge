@@ -101,6 +101,30 @@
             <option value="full">完全收敛</option>
           </select>
         </label>
+        <label>
+          过期时间
+          <input id="sub2api-expires-at" type="datetime-local" step="60" />
+          <small>留空表示不额外设置 Sub2API 调度过期时间。</small>
+        </label>
+        <label>
+          图片桥接策略
+          <select id="sub2api-image-bridge-strategy">
+            <option value="inherit" selected>跟随渠道</option>
+            <option value="enabled">启用 Hosted 桥接</option>
+            <option value="disabled">不注入 Hosted 工具</option>
+            <option value="strip">移除客户端图片工具</option>
+          </select>
+        </label>
+        <label>
+          WS mode
+          <select id="sub2api-ws-mode">
+            <option value="off" selected>关闭</option>
+            <option value="ctx_pool">上下文池</option>
+            <option value="passthrough">透传</option>
+            <option value="http_bridge">HTTP 桥接</option>
+          </select>
+        </label>
+        <label class="push-checkbox-label wide"><input id="sub2api-auto-pause-on-expired" type="checkbox" checked /> 过期自动暂停调度</label>
       </div>
 
       <section class="evaluation-workbench hidden" id="model-evaluation" aria-labelledby="model-evaluation-title">
@@ -398,6 +422,37 @@
                 <div class="login-progress-empty">输入账号并开始后，这里将显示每个账号的实时进度。</div>
               </div>
             </section>
+
+            <section class="saved-accounts-panel" id="saved-accounts-panel" aria-labelledby="saved-accounts-title">
+              <div class="saved-accounts-head">
+                <div>
+                  <h3 id="saved-accounts-title">已保存账号</h3>
+                  <p>展示当前浏览器工作区中的协议登录账号状态；凭据、Cookie 和完整 Token 不会显示。</p>
+                </div>
+                <span class="saved-accounts-count" id="saved-accounts-count">0 个账号</span>
+              </div>
+              <div class="saved-accounts-toolbar">
+                <label class="saved-accounts-search">搜索邮箱
+                  <input id="saved-accounts-search" type="search" autocomplete="off" placeholder="输入邮箱或账号 ID" />
+                </label>
+                <label>筛选
+                  <select id="saved-accounts-filter">
+                    <option value="all">全部账号</option>
+                    <option value="session">有 Web Session</option>
+                    <option value="rt">有个人 RT</option>
+                    <option value="business">有 Business RT</option>
+                    <option value="attention">需要关注</option>
+                  </select>
+                </label>
+              </div>
+              <div class="saved-accounts-table-wrap">
+                <table class="saved-accounts-table">
+                  <thead><tr><th>邮箱</th><th>登录状态</th><th>个人 RT</th><th>Business</th><th>测活</th><th>推送</th><th>复活</th><th>最近更新</th></tr></thead>
+                  <tbody id="saved-accounts-body"><tr><td colspan="8" class="empty">暂无已保存账号。</td></tr></tbody>
+                </table>
+              </div>
+              <div class="saved-accounts-status" id="saved-accounts-status">账号数据仅来自当前浏览器的加密工作区。</div>
+            </section>
           </div>
         </div>
       </section>
@@ -570,7 +625,11 @@
             <label>优先级<input id="login-sub2-priority" type="number" min="1" max="100" step="1" value="1" /></label>
             <label>负载因子<input id="login-sub2-load-factor" type="number" min="1" max="10000" step="1" value="1000" /></label>
             <label>指纹收敛<select id="login-sub2-fingerprint-mode"><option value="off">关闭（透传）</option><option value="device">仅设备</option><option value="session" selected>设备+会话</option><option value="full">完全收敛</option></select></label>
-            <label class="wide">模型（逗号、空格或换行）<textarea id="login-sub2-models" rows="3" spellcheck="false">gpt-5.5&#10;gpt-5.6-sol&#10;gpt-5.6-terra&#10;gpt-6-astra</textarea></label>
+            <label>过期时间<input id="login-sub2-expires-at" type="datetime-local" step="60" /><small>留空表示不额外设置 Sub2API 调度过期时间。</small></label>
+            <label>图片桥接策略<select id="login-sub2-image-bridge-strategy"><option value="inherit" selected>跟随渠道</option><option value="enabled">启用 Hosted 桥接</option><option value="disabled">不注入 Hosted 工具</option><option value="strip">移除客户端图片工具</option></select></label>
+            <label>WS mode<select id="login-sub2-ws-mode"><option value="off" selected>关闭</option><option value="ctx_pool">上下文池</option><option value="passthrough">透传</option><option value="http_bridge">HTTP 桥接</option></select></label>
+            <label class="push-checkbox-label wide"><input id="login-sub2-auto-pause-on-expired" type="checkbox" checked /> 过期自动暂停调度</label>
+            <label class="wide">模型（逗号、空格或换行）<textarea id="login-sub2-models" rows="3" spellcheck="false">gpt-5.5&#10;gpt-5.6-sol&#10;gpt-5.6-terra&#10;gpt-6-astra</textarea><small>协议登录推送时，原始账号输入会作为 Sub2API 备注保存。</small></label>
           </div>
         </details>
       </div>

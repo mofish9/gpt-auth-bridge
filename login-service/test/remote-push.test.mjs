@@ -9,6 +9,30 @@ import { monitorCoordinator } from '../src/services/monitor-coordinator.js';
 const sub2Account = name => ({ name, platform: 'openai', type: 'oauth', credentials: { access_token: 'fixture-access', refresh_token: 'fixture-rt', email: name } });
 const cpaAccount = id => ({ type: 'codex', email: 'fixture@example.com', account_id: id, access_token: 'fixture-access', refresh_token: `fixture-${id}` });
 
+test('Sub2API group discovery includes OpenAI and composite groups and accepts legacy groups', async t => {
+  const groups = [
+    { id: 40, name: 'OpenAI A', platform: 'openai', account_count: 2 },
+    { id: 42, name: 'Kimi', platform: 'kimi' },
+    { id: 59, name: 'OpenAI B', platform: 'openai' },
+    { id: 60, name: 'OpenAI C', platform: 'openai' },
+    { id: 61, name: 'Claude', platform: 'anthropic' },
+    { id: 62, name: 'Multi-model', platform: 'composite', account_count: 3 },
+    { id: 63, name: 'Deepseek', platform: 'deepseek' },
+  ];
+  const push = await fixture(t, async (url, options) => {
+    assert.equal(url, 'https://sub2.test/api/v1/admin/groups/all');
+    assert.equal(options.method, 'GET');
+    return Response.json({ code: 0, data: groups });
+  });
+  const body = { settings: { baseUrl: 'https://sub2.test', adminApiKey: 'fixture-key' } };
+  const result = await push('sub2api/groups', body);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.ok, true);
+  assert.deepEqual(result.body.groups, [groups[0], { ...groups[2], account_count: 0 }, { ...groups[3], account_count: 0 }, groups[5]]);
+  groups.push({ id: 64, name: 'Legacy' });
+  assert.deepEqual((await push('sub2api/groups', body)).body.groups.at(-1), { id: 64, name: 'Legacy', account_count: 0 });
+});
+
 test('stale browser leases cannot deliver automated pushes to either destination', async t => {
   const push = await fixture(t, () => assert.fail('must reject before external network'));
   const holder = '33333333-3333-4333-8333-333333333333';
@@ -70,6 +94,129 @@ test('monitor refuses ambiguous Sub2API updates and creates only after a complet
   assert.equal((await push('sub2api', body)).body.imported, 1);
   assert.deepEqual(methods, ['GET', 'GET', 'POST']);
 });
+
+test('monitor re-login restores an errored paused account only after updating credentials and confirms remote state', async t => {
+  const account = sub2Account('revived@example.com');
+  account.credentials.chatgpt_account_id = 'personal';
+  account.proxy_id = 5;
+  const row = { ...structuredClone(account), id: 73, group_ids: [7], proxy_id: 2,
+    credentials: { ...account.credentials, access_token: 'old-access', refresh_token: 'old-refresh', model_mapping: { keep: 'keep' } },
+    status: 'error', error_message: 'Authentication failed (401)', schedulable: false,
+    temp_unschedulable_until: '2099-01-01T00:00:00Z', concurrency: 8, priority: 3, load_factor: 100,
+    notes: 'operator note', extra: { codex_fingerprint_mode: 'full', keep: true }, auto_pause_on_expired: true,
+  };
+  const previousSettings = structuredClone(row);
+  const calls = [];
+  let cooldownCached = true;
+  const push = await fixture(t, async (url, options) => {
+    const path = new URL(url).pathname;
+    calls.push([options.method, path]);
+    if (path === '/api/v1/admin/accounts') return Response.json({ code: 0, data: { total: 1, items: [row] } });
+    if (options.method === 'PUT') {
+      const payload = JSON.parse(options.body);
+      assert.deepEqual(Object.keys(payload).sort(), ['credentials', 'proxy_id']);
+      assert.deepEqual(payload.credentials.model_mapping, { keep: 'keep' });
+      Object.assign(row, payload);
+    } else if (path.endsWith('/clear-error')) {
+      assert.equal(row.credentials.access_token, account.credentials.access_token);
+      row.status = 'active';
+      row.error_message = '';
+      row.temp_unschedulable_until = null;
+    } else if (options.method === 'DELETE') {
+      assert.ok(path.endsWith('/temp-unschedulable'));
+      cooldownCached = false;
+    } else if (path.endsWith('/schedulable')) {
+      assert.equal(cooldownCached, false);
+      assert.deepEqual(JSON.parse(options.body), { schedulable: true });
+      row.schedulable = true;
+    } else assert.equal(options.method, 'GET');
+    return Response.json({ code: 0, data: row });
+  });
+  const result = await push('sub2api', { settings: { baseUrl: 'https://sub2.test', adminApiKey: 'fixture-key', groupIds: [7] },
+    accounts: [account], upsert: true, recoverState: true });
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.imported, 1);
+  assert.equal(row.status, 'active');
+  assert.equal(row.schedulable, true);
+  assert.equal(row.proxy_id, 5);
+  assert.deepEqual(calls, [
+    ['GET', '/api/v1/admin/accounts'], ['PUT', '/api/v1/admin/accounts/73'],
+    ['POST', '/api/v1/admin/accounts/73/clear-error'], ['DELETE', '/api/v1/admin/accounts/73/temp-unschedulable'],
+    ['POST', '/api/v1/admin/accounts/73/schedulable'], ['GET', '/api/v1/admin/accounts/73'],
+  ]);
+  for (const key of ['group_ids', 'concurrency', 'priority', 'load_factor', 'notes', 'extra', 'auto_pause_on_expired']) {
+    assert.deepEqual(row[key], previousSettings[key], `${key} must be preserved`);
+  }
+  assert.doesNotMatch(JSON.stringify(result.body), /fixture-access|fixture-rt|fixture-key/);
+});
+
+test('monitor recovery never reports a partial restore as success and reconciliation keeps the recovery requirement', async t => {
+  for (const failure of ['credentials', 'clear-error', 'temp-unschedulable', 'schedulable', 'readback', 'readback-credentials']) await t.test(failure, async child => {
+    const account = sub2Account('partial@example.com');
+    account.credentials.chatgpt_account_id = 'personal';
+    const row = { ...structuredClone(account), id: 74, group_ids: [7], status: 'error', error_message: '401', schedulable: false };
+    row.credentials.access_token = 'old';
+    let writes = 0;
+    let fail = true;
+    const push = await fixture(child, async (url, options) => {
+      const path = new URL(url).pathname;
+      if (path === '/api/v1/admin/accounts') return Response.json({ code: 0, data: { total: 1, items: [row] } });
+      if (options.method === 'GET') {
+        return Response.json({ code: 0, data: fail && failure === 'readback-credentials'
+          ? { ...row, credentials: { ...row.credentials, access_token: 'stale' } } : row });
+      }
+      writes++;
+      const phase = options.method === 'PUT' ? 'credentials' : path.split('/').at(-1);
+      if (fail && failure === phase) return Response.json({ message: 'fixture-private-error' }, { status: failure === 'clear-error' ? 503 : 403 });
+      if (options.method === 'PUT') Object.assign(row, JSON.parse(options.body));
+      else if (phase === 'clear-error') { row.status = 'active'; row.error_message = ''; }
+      else if (phase === 'schedulable') row.schedulable = !(fail && failure === 'readback');
+      return Response.json({ code: 0, data: row });
+    });
+    const body = { settings: { baseUrl: 'https://sub2.test', adminApiKey: 'fixture-key', groupIds: [7] },
+      accounts: [account], upsert: true, recoverState: true };
+    const result = (await push('sub2api', body)).body;
+    assert.equal(result.ok, false);
+    assert.equal(result.imported, 0);
+    assert.equal(result.unknown, ['clear-error', 'readback-credentials'].includes(failure) ? 1 : 0);
+    assert.doesNotMatch(JSON.stringify(result), /fixture-private-error|fixture-access|fixture-rt|fixture-key/);
+    const beforeReconcile = writes;
+    const reconciled = (await push('sub2api/reconcile', body)).body;
+    assert.equal(writes, beforeReconcile, 'reconciliation must remain read-only');
+    if (failure === 'credentials') {
+      assert.equal(writes, 1, 'failed credential update must never clear errors or resume scheduling');
+      assert.equal(reconciled.unknown, 1);
+    } else if (failure !== 'readback-credentials') {
+      assert.equal(reconciled.imported, 0);
+      assert.equal(reconciled.results[0].code, 'REMOTE_RECOVERY_INCOMPLETE');
+      assert.equal(reconciled.results[0].retryable, true);
+    }
+    fail = false;
+    assert.equal((await push('sub2api', body)).body.imported, 1, 'upsert can retry recovery without creating duplicate accounts');
+  });
+});
+
+test('recovery reconciliation rejects paused, errored and temporarily blocked accounts with matching tokens', async t => {
+  const account = sub2Account('blocked@example.com');
+  account.credentials.chatgpt_account_id = 'personal';
+  let state = {};
+  const push = await fixture(t, async (_url, options) => {
+    assert.equal(options.method, 'GET');
+    return Response.json({ code: 0, data: { total: 1, items: [{ ...account, id: 75, group_ids: [7], status: 'active', schedulable: true, ...state }] } });
+  });
+  const body = { settings: { baseUrl: 'https://sub2.test', adminApiKey: 'fixture-key', groupIds: [7] }, accounts: [account], upsert: true, recoverState: true };
+  for (const blocked of [{ status: 'error' }, { schedulable: false }, { error_message: '401' },
+    { temp_unschedulable_until: '2099-01-01T00:00:00Z' }, { rate_limit_reset_at: '2099-01-01T00:00:00Z' }, { overload_until: '2099-01-01T00:00:00Z' }]) {
+    state = blocked;
+    const result = (await push('sub2api/reconcile', body)).body;
+    assert.equal(result.imported, 0);
+    assert.equal(result.results[0].code, 'REMOTE_RECOVERY_INCOMPLETE');
+    assert.equal((await push('sub2api/reconcile', { ...body, recoverState: false })).body.imported, 1, 'ordinary upsert only confirms credentials');
+  }
+  state = { temp_unschedulable_until: '2000-01-01T00:00:00Z' };
+  assert.equal((await push('sub2api/reconcile', body)).body.imported, 1);
+});
+
 async function fixture(t, fetchImpl) {
   const app = createApp();
   registerRemotePushRoutes(app, { fetchImpl });

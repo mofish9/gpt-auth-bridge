@@ -116,7 +116,7 @@ def exercise_push(page, login_plans):
             calls.append(('GET', self.path, None))
             if self.path == '/api/v1/admin/groups/all':
                 assert self.headers['x-api-key'] == 'fixture-sub2-key'
-                self.reply({'code': 0, 'data': [{'id': 7, 'name': 'Fixture OpenAI', 'platform': 'openai'}, {'id': 8, 'name': 'Not OpenAI', 'platform': 'anthropic'}]})
+                self.reply({'code': 0, 'data': [{'id': 7, 'name': 'Fixture OpenAI', 'platform': 'openai'}, {'id': 8, 'name': 'Not OpenAI', 'platform': 'anthropic'}, {'id': 9, 'name': 'Fixture Composite', 'platform': 'composite'}]})
             elif self.path == '/v0/management/auth-files':
                 assert self.headers['Authorization'] == 'Bearer fixture-cpa-key'
                 self.reply({'files': []})
@@ -199,7 +199,8 @@ def exercise_push(page, login_plans):
         page.locator('#login-sub2-base-url').fill(remote_url + '/admin')
         page.locator('#login-sub2-admin-key').fill('fixture-sub2-key')
         page.locator('#load-login-sub2-groups').click()
-        expect(page.locator('#login-sub2-groups input[type=checkbox]')).to_have_count(1)
+        expect(page.locator('#login-sub2-groups input[type=checkbox]')).to_have_count(2)
+        expect(page.locator('#login-sub2-groups')).to_contain_text('Fixture Composite')
         page.locator('[data-sub2-group-id="7"]').check()
         page.locator('#save-login-sub2-config').click()
         expect(page.locator('#login-sub2-status')).to_contain_text('已加密保存')

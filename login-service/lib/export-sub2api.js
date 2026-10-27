@@ -22,16 +22,58 @@ function resolveAccountDefaults(settings = {}) {
     rateMultiplier: process.env.SUB2API_RATE_MULTIPLIER,
     fingerprintMode: process.env.SUB2API_FINGERPRINT_MODE,
     models: process.env.SUB2API_MODELS,
+    expiresAt: process.env.SUB2API_EXPIRES_AT,
+    autoPauseOnExpired: process.env.SUB2API_AUTO_PAUSE_ON_EXPIRED,
+    imageBridgeStrategy: process.env.SUB2API_IMAGE_BRIDGE_STRATEGY,
+    wsMode: process.env.SUB2API_WS_MODE,
   };
   const defaults = sub2ApiAccountDefaults({ ...envDefaults, ...settings });
   return { ...defaults, modelMapping: Object.fromEntries(defaults.models.map(model => [model, model])) };
+}
+
+function applyExtraSettings(extra, defaults) {
+  const next = { ...(extra || {}) };
+  if (defaults.imageBridgeStrategy === 'inherit') {
+    delete next.codex_image_generation_bridge;
+    delete next.codex_image_generation_explicit_tool_policy;
+  } else if (defaults.imageBridgeStrategy === 'enabled') {
+    next.codex_image_generation_bridge = true;
+    delete next.codex_image_generation_explicit_tool_policy;
+  } else if (defaults.imageBridgeStrategy === 'disabled') {
+    next.codex_image_generation_bridge = false;
+    delete next.codex_image_generation_explicit_tool_policy;
+  } else if (defaults.imageBridgeStrategy === 'strip') {
+    delete next.codex_image_generation_bridge;
+    next.codex_image_generation_explicit_tool_policy = 'strip';
+  }
+  next.openai_oauth_responses_websockets_v2_mode = defaults.wsMode;
+  return next;
+}
+
+function applyAccountSettings(account, defaults) {
+  const next = {
+    ...account,
+    concurrency: defaults.concurrency,
+    priority: defaults.priority,
+    load_factor: defaults.loadFactor,
+    rate_multiplier: defaults.rateMultiplier,
+    auto_pause_on_expired: defaults.autoPauseOnExpired,
+    extra: applyExtraSettings(account.extra, defaults),
+  };
+  if (defaults.expiresAt != null) next.expires_at = defaults.expiresAt;
+  return next;
+}
+
+function recordNotes(record) {
+  const notes = String(record?.notes || '').trim();
+  return notes ? { notes } : {};
 }
 
 export function buildSub2ApiAccount(record, settings = {}) {
   const defaults = resolveAccountDefaults(settings);
   if (isAgentIdentityRecord(record)) {
     const email = String(record.email || '');
-    return {
+    return applyAccountSettings({
       name: email || `openai-${Date.now()}`,
       platform: 'openai',
       type: 'oauth',
@@ -48,12 +90,8 @@ export function buildSub2ApiAccount(record, settings = {}) {
         task_id: String(record.task_id || `task-${String(record.agent_runtime_id).replace(/^agent-/, '')}`),
       },
       extra: { email, codex_fingerprint_mode: defaults.fingerprintMode },
-      concurrency: defaults.concurrency,
-      priority: defaults.priority,
-      load_factor: defaults.loadFactor,
-      rate_multiplier: defaults.rateMultiplier,
-      auto_pause_on_expired: false,
-    };
+      ...recordNotes(record),
+    }, defaults);
   }
   const accessClaims = decodeJwtPayload(record.access_token);
   const idClaims = decodeJwtPayload(record.id_token);
@@ -67,7 +105,7 @@ export function buildSub2ApiAccount(record, settings = {}) {
   const accountId = firstNonEmpty(record.account_id, accessAuth.chatgpt_account_id, idAuth.chatgpt_account_id);
   const planType = firstNonEmpty(record.plan_type, accessAuth.chatgpt_plan_type, idAuth.chatgpt_plan_type, 'free');
 
-  return {
+  return applyAccountSettings({
     name: email || `openai-${Date.now()}`,
     platform: 'openai',
     type: 'oauth',
@@ -86,12 +124,8 @@ export function buildSub2ApiAccount(record, settings = {}) {
       model_mapping: { ...defaults.modelMapping },
     },
     extra: { email, source: String(record?.extra?.source || record?.source || 'codex-sms-auth'), codex_fingerprint_mode: defaults.fingerprintMode, ...(record?.extra?.workspace_id ? { workspace_id: String(record.extra.workspace_id) } : {}) },
-    concurrency: defaults.concurrency,
-    priority: defaults.priority,
-    load_factor: defaults.loadFactor,
-    rate_multiplier: defaults.rateMultiplier,
-    auto_pause_on_expired: true,
-  };
+    ...recordNotes(record),
+  }, defaults);
 }
 
 export function buildSub2ApiExport(records, exportedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'), settings = {}) {

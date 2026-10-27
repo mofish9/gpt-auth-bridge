@@ -6,6 +6,8 @@ export const SUB2API_DEFAULT_MODELS = Object.freeze([
 ]);
 
 export const SUB2API_FINGERPRINT_MODES = Object.freeze(['off', 'device', 'session', 'full']);
+export const SUB2API_IMAGE_BRIDGE_STRATEGIES = Object.freeze(['inherit', 'enabled', 'disabled', 'strip']);
+export const SUB2API_WS_MODES = Object.freeze(['off', 'ctx_pool', 'passthrough', 'http_bridge']);
 
 function clampNumber(value, fallback, minimum, maximum, { integer = false } = {}) {
   const parsed = Number(value);
@@ -35,6 +37,10 @@ export function readSub2ApiSettingsDefaults(env = process.env) {
     loadFactor: env.SUB2API_LOAD_FACTOR,
     fingerprintMode: env.SUB2API_FINGERPRINT_MODE,
     models: env.SUB2API_MODELS,
+    expiresAt: env.SUB2API_EXPIRES_AT,
+    autoPauseOnExpired: env.SUB2API_AUTO_PAUSE_ON_EXPIRED,
+    imageBridgeStrategy: env.SUB2API_IMAGE_BRIDGE_STRATEGY,
+    wsMode: env.SUB2API_WS_MODE,
   });
 }
 
@@ -58,7 +64,28 @@ export function normalizeSub2ApiSettings(value = {}, defaults = {}) {
       ? String(merged.fingerprintMode || merged.fingerprint_mode).trim()
       : 'session',
     models: requestedModels.length ? requestedModels : [...SUB2API_DEFAULT_MODELS],
+    expiresAt: normalizeExpiresAt(merged.expiresAt ?? merged.expires_at),
+    autoPauseOnExpired: normalizeBoolean(merged.autoPauseOnExpired ?? merged.auto_pause_on_expired, true),
+    imageBridgeStrategy: SUB2API_IMAGE_BRIDGE_STRATEGIES.includes(String(merged.imageBridgeStrategy || merged.image_bridge_strategy || '').trim())
+      ? String(merged.imageBridgeStrategy || merged.image_bridge_strategy).trim()
+      : 'inherit',
+    wsMode: SUB2API_WS_MODES.includes(String(merged.wsMode || merged.ws_mode || '').trim())
+      ? String(merged.wsMode || merged.ws_mode).trim()
+      : 'off',
   };
+}
+
+function normalizeBoolean(value, fallback) {
+  if (value === true || value === 1 || value === '1' || String(value).toLowerCase() === 'true') return true;
+  if (value === false || value === 0 || value === '0' || String(value).toLowerCase() === 'false') return false;
+  return fallback;
+}
+
+function normalizeExpiresAt(value) {
+  if (value == null || value === '') return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return Math.trunc(numeric > 10_000_000_000 ? numeric / 1000 : numeric);
 }
 
 export function publicSub2ApiSettings(value = {}) {
@@ -81,5 +108,9 @@ export function sub2ApiAccountDefaults(value = {}) {
     rateMultiplier: settings.rateMultiplier,
     fingerprintMode: settings.fingerprintMode,
     models: settings.models,
+    expiresAt: settings.expiresAt,
+    autoPauseOnExpired: settings.autoPauseOnExpired,
+    imageBridgeStrategy: settings.imageBridgeStrategy,
+    wsMode: settings.wsMode,
   };
 }

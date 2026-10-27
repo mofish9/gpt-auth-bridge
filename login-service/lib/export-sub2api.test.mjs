@@ -51,6 +51,24 @@ import {
 {
   const account = buildSub2ApiAccount({
     access_token: 'a.b.c', id_token: 'a.b.c', refresh_token: 'rt', email: 'configured@example.com',
+    notes: 'configured@example.com----password----JBSWY3DPEHPK3PXP',
+  }, {
+    expiresAt: 1780000000,
+    autoPauseOnExpired: false,
+    imageBridgeStrategy: 'strip',
+    wsMode: 'ctx_pool',
+  });
+  assert.equal(account.notes, 'configured@example.com----password----JBSWY3DPEHPK3PXP');
+  assert.equal(account.expires_at, 1780000000);
+  assert.equal(account.auto_pause_on_expired, false);
+  assert.equal(account.extra.codex_image_generation_explicit_tool_policy, 'strip');
+  assert.equal(account.extra.codex_image_generation_bridge, undefined);
+  assert.equal(account.extra.openai_oauth_responses_websockets_v2_mode, 'ctx_pool');
+}
+
+{
+  const account = buildSub2ApiAccount({
+    access_token: 'a.b.c', id_token: 'a.b.c', refresh_token: 'rt', email: 'configured@example.com',
   }, { accountConcurrency: 15, priority: 3, loadFactor: 1000 });
   assert.equal(account.concurrency, 15);
   assert.equal(account.priority, 3);

@@ -41,6 +41,13 @@ export function cpaFileName(account) {
 }
 
 function pushFailure(error, { started = true } = {}) {
+  if (error.recoveryPending) {
+    const confirmedFailure = error.code === 'REMOTE_RECOVERY_INCOMPLETE' || (error.status >= 400 && error.status < 500 && error.status !== 408);
+    return { status: confirmedFailure ? 'failed' : 'unknown', retryable: confirmedFailure,
+      code: confirmedFailure ? 'REMOTE_RECOVERY_INCOMPLETE' : 'REMOTE_RECOVERY_UNKNOWN',
+      error: confirmedFailure ? '凭据已更新，但账号错误状态或调度恢复失败，可重试恢复'
+        : '凭据已更新，账号状态恢复结果未确认，请先核对远端结果' };
+  }
   const rejected = !started || (error.status >= 400 && error.status < 500 && error.status !== 408);
   return { status: rejected ? 'failed' : 'unknown', retryable: rejected && error.status !== 409,
     code: !started ? error.code || 'PUSH_NOT_STARTED' : rejected ? 'REMOTE_REJECTED' : 'REMOTE_RESULT_UNKNOWN',
@@ -139,7 +146,7 @@ export function registerRemotePushRoutes(app, { fetchImpl = fetch } = {}) {
   const sub2Client = (settings, signal) => new Sub2ApiClient(normalizePushUrl(settings.baseUrl, 'sub2api'), settings.adminApiKey, { fetchImpl, signal });
   route('sub2api/groups', async ({ settings = {} }, signal) => {
     const groups = await sub2Client(settings, signal).listGroups();
-    return { ok: true, groups: groups.filter(group => !group.platform || group.platform === 'openai').map(group => ({ id: group.id, name: group.name, platform: group.platform, account_count: group.account_count || 0 })) };
+    return { ok: true, groups: groups.filter(group => !group.platform || ['openai', 'composite'].includes(group.platform)).map(group => ({ id: group.id, name: group.name, platform: group.platform, account_count: group.account_count || 0 })) };
   });
   route('sub2api/proxies', async ({ settings = {} }, signal) => {
     const proxies = await sub2Client(settings, signal).listProxies();
@@ -151,7 +158,7 @@ export function registerRemotePushRoutes(app, { fetchImpl = fetch } = {}) {
     })).filter(proxy => Number.isSafeInteger(proxy.id) && proxy.id > 0) };
   });
   route('cpa/check', ({ settings = {} }, signal) => new CpaClient(settings.baseUrl, settings.managementKey, { fetchImpl, signal }).check());
-  for (const target of ['sub2api', 'cpa']) for (const reconcile of [false, true]) route(reconcile ? `${target}/reconcile` : target, async ({ settings = {}, accounts, upsert = false, operationId, itemIds }, signal) => {
+  for (const target of ['sub2api', 'cpa']) for (const reconcile of [false, true]) route(reconcile ? `${target}/reconcile` : target, async ({ settings = {}, accounts, upsert = false, recoverState = false, operationId, itemIds }, signal) => {
     const invalid = message => { throw Object.assign(new Error(message), { validation: true }); };
     if (!Array.isArray(accounts) || !accounts.length || accounts.length > 2000) invalid('请提供 1–2000 个账号');
     for (const [index, account] of accounts.entries()) {
@@ -190,7 +197,7 @@ export function registerRemotePushRoutes(app, { fetchImpl = fetch } = {}) {
             signal.throwIfAborted();
             try {
               const result = await runAccountTask(() => target === 'sub2api'
-                ? client.reconcileAccount(pushAccounts[index], settings.groupIds, { credentialsOnly: upsert === true }) : client.reconcile(account, files), { signal });
+                ? client.reconcileAccount(pushAccounts[index], settings.groupIds, { credentialsOnly: upsert === true, recoverState: upsert === true && recoverState === true }) : client.reconcile(account, files), { signal });
               results.push({ index, name: account.name || cpaFileName(account), ...result });
             } catch {
               signal.throwIfAborted();
@@ -219,7 +226,7 @@ export function registerRemotePushRoutes(app, { fetchImpl = fetch } = {}) {
               try {
                 const value = await runAccountTask(() => {
                   started = true;
-                  return target === 'sub2api' ? client.upsertAccount(pushAccounts[index], settings.groupIds) : client.upload(account);
+                  return target === 'sub2api' ? client.upsertAccount(pushAccounts[index], settings.groupIds, { recoverState: recoverState === true }) : client.upload(account);
                 }, { signal });
                 results[index] = target === 'sub2api' ? { ...sub2PushResults({ results: [value] }, [account])[0], index }
                   : { index, name: value, status: 'success', retryable: false, code: 'REMOTE_CONFIRMED' };
