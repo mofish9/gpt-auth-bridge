@@ -1260,7 +1260,7 @@ label:has(#login-push-sub2-only) { display: none !important; }
 .saved-accounts-toolbar .saved-accounts-search { flex: 1 1 260px; }
 .saved-accounts-toolbar input, .saved-accounts-toolbar select { width: 100%; min-height: 34px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); color: var(--text); font: inherit; }
 .saved-accounts-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 7px; }
-.saved-accounts-table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: .78rem; }
+.saved-accounts-table { width: 100%; min-width: 930px; border-collapse: collapse; font-size: .78rem; }
 .saved-accounts-table th:first-child, .saved-accounts-table td:first-child { width: 280px; }
 .saved-accounts-table th, .saved-accounts-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: center; vertical-align: middle; }
 .saved-accounts-table th:first-child, .saved-accounts-table td:first-child { text-align: left; }
@@ -1274,6 +1274,9 @@ label:has(#login-push-sub2-only) { display: none !important; }
 .saved-account-copy { display: inline-flex; align-items: center; max-width: 280px; min-height: 24px; padding: 2px 7px; overflow: hidden; border: 0; border-radius: 5px; background: var(--surface-soft); color: var(--text); font: inherit; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .saved-account-copy:hover { background: var(--line); }
 .saved-account-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.saved-account-delete { min-height: 24px; padding: 3px 8px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line)); border-radius: 5px; background: transparent; color: var(--danger); font: inherit; cursor: pointer; }
+.saved-account-delete:hover { background: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
+.saved-account-delete:focus-visible { outline: 2px solid var(--danger); outline-offset: 1px; }
 .saved-account-email-copy { width: 100%; }
 .saved-account-input-copy { margin-top: 4px; }
 .saved-account-id { margin-top: 3px; color: var(--muted); font-size: .68rem; }

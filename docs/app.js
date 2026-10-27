@@ -1984,6 +1984,107 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = `${labels[kind] || '内容'}已复制${kind === 'business-rt' && result.count > 1 ? `（${result.count} 个）` : ''}。完整内容不会显示在页面上。`;
   }
 
+  function savedAccountIdentityMatches(value, account) {
+    const localId = String(account?.id || '').trim();
+    const localEmail = String(account?.email || '').trim().toLowerCase();
+    if (!localId && !localEmail) return false;
+    const item = value?.account && typeof value.account === 'object' ? value.account : value;
+    const credentials = item?.credentials || item?.tokens || {};
+    const identity = value?.identity || {};
+    const ids = [item?.id, item?.account_id, item?.openai_account_id, credentials?.chatgpt_account_id,
+      credentials?.account_id, item?.workspace_id, identity?.accountId, identity?.workspaceId]
+      .map(value => String(value || '').trim()).filter(Boolean);
+    const emails = [item?.email, item?.name, credentials?.email, item?.user?.email, identity?.email]
+      .map(value => String(value || '').trim().toLowerCase()).filter(Boolean);
+    return (localId && ids.includes(localId)) || (localEmail && emails.includes(localEmail));
+  }
+
+  function removeSavedAccountFromPushHistory(account) {
+    state.pushOperations = (state.pushOperations || []).map(operation => ({
+      ...operation,
+      items: (operation.items || []).filter(item => !savedAccountIdentityMatches(item, account)),
+    })).filter(operation => operation.items.length);
+    if (state.activePushOperationId && !state.pushOperations.some(operation => operation.operationId === state.activePushOperationId)) {
+      state.activePushOperationId = state.pushOperations.at(-1)?.operationId || '';
+    }
+    syncPushOperationViews();
+  }
+
+  function removeSavedAccountFromLocalState(account) {
+    const id = String(account.id || '');
+    const email = String(account.email || '').trim().toLowerCase();
+    state.browserAccounts = state.browserAccounts.filter(item => String(item?.id || '') !== id);
+    for (const key of ['loginLastIds', 'loginSessionIds', 'loginPersonalIds', 'loginBusinessIds']) {
+      state[key] = (state[key] || []).filter(value => String(value) !== id);
+    }
+    state.monitorRetries = Object.fromEntries(Object.entries(state.monitorRetries || {}).filter(([key]) => key !== id));
+    state.monitorStopped = Object.fromEntries(Object.entries(state.monitorStopped || {}).filter(([key]) => key !== id));
+    state.monitorRevivalHistory = Object.fromEntries(Object.entries(state.monitorRevivalHistory || {}).filter(([key]) => key !== id));
+    state.loginProgress = new Map([...state.loginProgress].filter(([key, record]) =>
+      String(key).toLowerCase() !== email && String(record?.id || '') !== id && String(record?.email || '').trim().toLowerCase() !== email));
+    state.loginLastAccounts = (state.loginLastAccounts || []).filter(item => !savedAccountIdentityMatches(item, account));
+    if (state.loginLastResponse && typeof state.loginLastResponse === 'object') {
+      for (const key of ['accounts', 'results']) if (Array.isArray(state.loginLastResponse[key])) {
+        state.loginLastResponse[key] = state.loginLastResponse[key].filter(item => !savedAccountIdentityMatches(item, account));
+      }
+      if (state.loginLastResponse.browserState?.accounts) {
+        state.loginLastResponse.browserState.accounts = state.loginLastResponse.browserState.accounts.filter(item => !savedAccountIdentityMatches(item, account));
+      }
+    }
+    if (state.loginRetry) {
+      state.loginRetry.accounts = (state.loginRetry.accounts || []).filter(item => !savedAccountIdentityMatches(item, account));
+      state.loginRetry.ids = state.loginRetry.accounts.map(item => String(item.id)).filter(Boolean);
+      state.loginRetry.inputEmails = (state.loginRetry.inputEmails || []).filter(value => String(value).toLowerCase() !== email);
+      if (!state.loginRetry.ids.length) state.loginRetry = null;
+    }
+    for (const key of ['selfLeave', 'logoutAll']) {
+      const retry = state.accountActionRetries?.[key];
+      if (!retry) continue;
+      retry.emails = (retry.emails || []).filter(value => String(value).toLowerCase() !== email);
+      retry.inputEmails = (retry.inputEmails || []).filter(value => String(value).toLowerCase() !== email);
+      if (!retry.emails.length) delete state.accountActionRetries[key];
+    }
+    state.logoutResults = (state.logoutResults || []).filter(item => !savedAccountIdentityMatches(item, account));
+    state.logoutLog = (state.logoutLog || []).filter(line => !email || !String(line).toLowerCase().includes(email));
+    state.loginSensitiveValues = [];
+    elements.loginAccounts.value = elements.loginAccounts.value.split(/\r?\n/)
+      .filter(line => String(line).trim() && loginAccountEmail(line).toLowerCase() !== email).join('\n');
+    if (elements.loginResetCredentials) {
+      elements.loginResetCredentials.textContent = elements.loginResetCredentials.textContent.split(/\r?\n/)
+        .filter(line => !email || !String(line).toLowerCase().includes(email)).join('\n');
+      elements.loginResetOutput?.classList.toggle('hidden', !elements.loginResetCredentials.textContent);
+    }
+    removeSavedAccountFromPushHistory(account);
+    elements.loginAccountCount.textContent = `${countLoginAccountLines()} 个账号`;
+    renderLoginProgress();
+    renderSavedAccounts();
+    updateLoginExportActions();
+    updatePushControls();
+  }
+
+  async function deleteSavedAccount(accountId) {
+    if (monitorBusy || pushBusy || selfLeaveBusy || protocolLogoutBusy || elements.startProtocolLogin.disabled || elements.resetLoginTotp.disabled) {
+      if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = '当前有账号任务正在执行，请完成后再删除。';
+      return;
+    }
+    const account = state.browserAccounts.find(item => String(item?.id || '') === String(accountId || ''));
+    if (!account) return;
+    const email = String(account.email || '').trim() || '未知邮箱';
+    if (typeof window.confirm === 'function' && !window.confirm(`确认删除已保存账号「${email}」？\n\n将删除当前浏览器中的密码、2FA、Session、RT、测活记录、复活记录和相关推送历史。不会删除 Sub2API 或 CPA 中的远端账号。此操作无法撤销。`)) return;
+    removeSavedAccountFromLocalState(account);
+    try {
+      await persistBrowserWorkspace(true, true);
+    } catch (error) {
+      if (error?.code === 'WORKSPACE_CONFLICT') {
+        window.location.reload();
+        return;
+      }
+      if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = '删除后的浏览器数据保存失败，请刷新页面确认当前状态。';
+      return;
+    }
+    if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = `已删除 ${email}。远端 Sub2API / CPA 账号未改变。`;
+  }
+
   function renderSavedAccounts() {
     if (!elements.savedAccountsBody) return;
     const accounts = Array.isArray(state.browserAccounts) ? state.browserAccounts : [];
@@ -2006,7 +2107,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
 
     elements.savedAccountsCount.textContent = query || filter !== 'all' ? `${matches.length}/${accounts.length} 个账号` : `${accounts.length} 个账号`;
     if (!matches.length) {
-      elements.savedAccountsBody.innerHTML = `<tr><td colspan="8" class="empty">${accounts.length ? '没有符合筛选条件的账号。' : '暂无已保存账号。'}</td></tr>`;
+      elements.savedAccountsBody.innerHTML = `<tr><td colspan="9" class="empty">${accounts.length ? '没有符合筛选条件的账号。' : '暂无已保存账号。'}</td></tr>`;
       if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = accounts.length
         ? '可调整搜索或筛选条件。凭据、Cookie 和完整 Token 不会显示。'
         : '账号数据仅来自当前浏览器的加密工作区。';
@@ -2049,6 +2150,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         <td>${savedAccountBadge(push.text, push.tone)}</td>
         <td>${revivalCell}</td>
         <td>${escapeHtml(formatLoginTime(account.updatedAt || account.createdAt) || '-')}</td>
+        <td><button type="button" class="saved-account-delete" data-saved-delete-account="${escapeHtml(id)}">删除</button></td>
       </tr>`;
     }).join('');
     if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = '仅显示状态摘要；完整凭据仍保存在当前浏览器的加密工作区。';
@@ -2808,7 +2910,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
 
   function syncPushOperationViews() {
     const operation = activePushOperation();
-    if (!operation) return;
+    if (!operation) {
+      state.pushResults = [];
+      state.pushRetry = null;
+      return;
+    }
     state.pushResults = operation.items.map(({ account, ...item }, index) => ({ ...item, index }));
     const failed = operation.items.filter(item => item.account && !item.disabled && item.status === 'failed' && item.retryable === true);
     state.pushRetry = failed.length ? {
@@ -4304,6 +4410,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   elements.savedAccountsSearch?.addEventListener('input', renderSavedAccounts);
   elements.savedAccountsFilter?.addEventListener('change', renderSavedAccounts);
   elements.savedAccountsBody?.addEventListener('click', event => {
+    const deleteButton = event.target.closest('[data-saved-delete-account]');
+    if (deleteButton) {
+      void deleteSavedAccount(deleteButton.dataset.savedDeleteAccount);
+      return;
+    }
     const button = event.target.closest('[data-saved-copy-kind]');
     if (!button) return;
     void copySavedAccountField(button.dataset.savedAccountId, button.dataset.savedCopyKind);
