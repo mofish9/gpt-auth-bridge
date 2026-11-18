@@ -717,6 +717,7 @@ body.is-team-checkout { background: #fff; }
 }
 
 .login-step-list {
+  --login-step-count: 7;
   display: grid;
   gap: 0;
   margin: 0;
@@ -744,6 +745,11 @@ body.is-team-checkout { background: #fff; }
   width: 2px;
   background: var(--line-strong);
 }
+
+.login-step-list[data-step-count="5"] { --login-step-count: 5; }
+.login-step[hidden] { display: none; }
+.login-step.is-last-step::after { display: none; }
+.login-help { margin: 0; align-self: center; color: var(--muted); font-size: 13px; line-height: 1.6; }
 
 .login-step-marker {
   position: relative;
@@ -822,6 +828,7 @@ body.is-team-checkout { background: #fff; }
 
 .login-reset-output-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
@@ -844,6 +851,12 @@ body.is-team-checkout { background: #fff; }
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+#login-reset-pending-status {
+  padding-left: 20px;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
 }
 
 .login-account-label small {
@@ -1324,6 +1337,10 @@ label:has(#login-push-sub2-only) { display: none !important; }
 .push-target input { margin: 0; accent-color: var(--accent); }
 .push-config-actions { display: flex; gap: 6px; }
 .push-controls .button { flex: 0 0 auto; width: auto; min-height: 32px; padding: 6px 9px; font-size: .78rem; white-space: nowrap; }
+.converter-free-filter { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.converter-free-filter:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.converter-free-filter:has(input:disabled) { opacity: .55; cursor: not-allowed; }
+.converter-free-filter input { width: 14px; height: 14px; margin: 0; padding: 0; accent-color: var(--accent); }
 .push-feedback { margin-top: 10px; }
 .push-feedback[hidden] { display: none; }
 .push-toast {
@@ -1784,7 +1801,7 @@ tr:last-child td {
   }
 
   .login-step-list {
-    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-template-columns: repeat(var(--login-step-count), minmax(0, 1fr));
     gap: 6px;
   }
 
@@ -1933,7 +1950,7 @@ tr:last-child td {
   }
 
   .login-step-list {
-    grid-template-columns: repeat(7, 86px);
+    grid-template-columns: repeat(var(--login-step-count), 86px);
     width: 100%;
     overflow-x: auto;
     padding-bottom: 4px;
@@ -2028,6 +2045,11 @@ body.is-model-evaluation { background: #f5f7f8; }
 .evaluation-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
 .evaluation-heading h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: -.6px; }
 .evaluation-heading p { margin: 0; color: var(--muted); font-size: 14px; }
+.evaluation-heading-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.evaluation-heading-actions .button { padding: 10px 12px; font-size: 13px; }
+#evaluation-logout-status { max-height: 120px; overflow: auto; overflow-wrap: anywhere; font-size: 13px; line-height: 1.7; }
+#evaluation-push-feedback-slot { flex: none; max-height: 28%; overflow: auto; }
+#evaluation-push-feedback-slot .push-feedback { margin: 0 0 10px; }
 .evaluation-live-label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .evaluation-live-label > span { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
 .evaluation-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px; align-items: start; }
@@ -2078,6 +2100,9 @@ body.is-model-evaluation { background: #f5f7f8; }
 .evaluation-run-status progress { display: block; width: 100%; height: 5px; accent-color: var(--accent); border: 0; border-radius: 3px; overflow: hidden; background: var(--line); }
 .evaluation-run-status progress::-webkit-progress-bar { background: var(--line); }
 .evaluation-run-status progress::-webkit-progress-value { background: var(--accent); }
+.evaluation-run-status > .evaluation-copy-actions { justify-content: flex-start; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.evaluation-copy-actions .button { padding: 8px 12px; font-size: 12px; }
+#evaluation-copy-status { margin: 6px 0 0; }
 .evaluation-viewer { background: white; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .evaluation-viewer-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 22px 24px 16px; }
 .evaluation-viewer-heading h2 { font-size: 19px; margin: 0 0 7px; }
@@ -2202,9 +2227,18 @@ body.is-model-evaluation { background: #f5f7f8; }
   .evaluation-stage { order: -1; height: calc(100dvh - var(--evaluation-top, 180px) - 95px); min-height: 390px; }
   .evaluation-sidebar { width: 100%; height: auto; overflow: visible; }
   .evaluation-heading p, .evaluation-output-note { display: none; }
-  .evaluation-heading { margin-bottom: 10px; }
+  .evaluation-heading { margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
+  .evaluation-heading-actions { width: 100%; justify-content: flex-start; }
+  .evaluation-heading-actions .button { padding: 8px 10px; font-size: 12px; }
   .evaluation-view-tabs [role=tablist] { gap: 14px; }
   .evaluation-preview-actions { gap: 12px; }
   .evaluation-preview-dialog header { flex-wrap: wrap; gap: 10px; }
   .evaluation-preview-dialog .evaluation-preview-surface { height: 64dvh; }
 }
+#evaluation-fields .evaluation-optional-question { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; cursor: pointer; }
+#evaluation-fields .evaluation-optional-question input { width: 15px; height: 15px; padding: 0; margin: 0; accent-color: var(--accent); }
+.evaluation-optional-question small, #evaluation-concurrency { color: var(--muted); font-weight: 400; font-size: 11px; }
+.shared-account-status { color: var(--accent, #24505a); font-size: 13px; }
+.shared-account-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 16px; }
+.shared-account-links p { flex-basis: 100%; margin: 0 0 4px; font-size: 13px; color: var(--muted, #61717b); }
+.shared-account-links .button { padding: 8px 12px; font-size: 13px; }

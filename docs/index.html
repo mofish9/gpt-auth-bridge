@@ -130,8 +130,13 @@
       <section class="evaluation-workbench hidden" id="model-evaluation" aria-labelledby="model-evaluation-title">
         <header class="evaluation-heading">
           <div><h1 id="model-evaluation-title">模型测试</h1><p>从一道推理题，到一段会动的画面。实时查看模型的生成过程。</p></div>
-          <span class="evaluation-live-label"><span aria-hidden="true"></span>流式输出与实时预览</span>
+          <div class="evaluation-heading-actions">
+            <button class="button button-secondary" id="evaluation-sub2-config" type="button">Sub2API 配置</button>
+            <button class="button button-primary" id="evaluation-push-passed" type="button" title="仅推送本轮糖果题答案正确且当前测活通过的账号" disabled>推送答案正确账号到 Sub2API（0）</button>
+            <button class="button button-secondary" id="evaluation-logout-failed" type="button" title="退出本轮糖果题已测试但未答对账号的全部会话；同一邮箱有工作区答对则保留，未测试或已停止的任务不退出" disabled>退出非答案正确账号会话（0）</button>
+          </div>
         </header>
+        <p id="evaluation-logout-status" class="status" role="status" hidden></p>
         <div class="evaluation-layout">
           <aside class="evaluation-sidebar" aria-label="测试配置与队列">
             <form id="evaluation-form" autocomplete="off">
@@ -143,8 +148,9 @@
                 </div>
                 <div id="evaluation-accounts-source" class="evaluation-source">
                   <p id="evaluation-account-count">暂无测活通过的账号</p>
-                  <small>导入后自动测活，仅测试 HTTP 200 的账号。</small>
+                  <small>同步格式转换、批处理和协议登录账号。自动测活，仅测试 HTTP 200 的账号，跳过 free 账号。</small>
                   <button type="button" class="button button-secondary" id="evaluation-import">导入账号</button>
+                  <button type="button" class="button button-secondary" id="evaluation-health-check">重新测活</button>
                 </div>
                 <div id="evaluation-api-source" class="evaluation-source" hidden>
                   <label for="evaluation-api-url">API 地址<input id="evaluation-api-url" type="url" placeholder="https://api.example.com/v1" maxlength="2048" spellcheck="false" /></label>
@@ -154,7 +160,7 @@
                 </div>
                 <label for="evaluation-model">测试模型<input id="evaluation-model" list="evaluation-models" value="gpt-6-astra" maxlength="100" required spellcheck="false" /></label>
                 <datalist id="evaluation-models"><option value="gpt-6-astra"></option><option value="gpt-5.6-sol"></option><option value="gpt-5.6-terra"></option><option value="gpt-5.5"></option></datalist>
-                <div class="evaluation-question-summary"><span>本轮测试</span><strong>糖果题 <small>推理 / 答案 21</small></strong><strong>鹈鹕骑自行车 <small>SVG / 动画</small></strong></div>
+                <div class="evaluation-question-summary"><span>本轮测试</span><strong>糖果题 <small>默认必测 / 答案 21</small></strong><label class="evaluation-optional-question"><input id="evaluation-include-pelican" type="checkbox" data-private="true" />同时测试鹈鹕题 <small>SVG / 动画</small></label><small id="evaluation-concurrency">并发按服务端配置</small></div>
                 <button class="button button-primary" type="submit" data-evaluation-start disabled>开始测试</button>
               </fieldset>
               <button class="button button-secondary evaluation-stop" type="button" data-evaluation-stop disabled>停止测试</button>
@@ -163,9 +169,15 @@
             <div data-evaluation-results class="evaluation-queue"><p class="evaluation-queue-empty">开始后，点击任务查看生成过程。</p></div>
           </aside>
           <div class="evaluation-stage">
+            <div id="evaluation-push-feedback-slot"></div>
             <section class="evaluation-run-status" aria-label="本轮进度">
               <div><p role="status" aria-live="polite" id="evaluation-status">准备就绪，选择测试来源后开始。</p><span id="evaluation-progress-count">0 / 0</span></div>
               <progress id="evaluation-progress" max="1" value="0" aria-label="测试完成进度"></progress>
+              <div class="evaluation-copy-actions" role="group" aria-label="复制测试账号">
+                <button class="button button-secondary" id="evaluation-copy-success" type="button" title="复制本轮糖果题答案正确的账号，同邮箱合并；优先复制原始登录凭据，无凭据时复制邮箱" disabled>复制成功账号（0）</button>
+                <button class="button button-secondary" id="evaluation-copy-failed" type="button" title="复制本轮糖果题未答对的账号，含请求失败；同邮箱有答对工作区则归入成功，未测试或已停止的任务不计入" disabled>复制失败账号（0）</button>
+              </div>
+              <p id="evaluation-copy-status" class="status-line" role="status" hidden></p>
             </section>
             <article class="evaluation-viewer" aria-label="当前任务详情">
               <header class="evaluation-viewer-heading"><div><h2 id="evaluation-case-title">鹈鹕骑自行车</h2><p id="evaluation-case-target">生成内容将在这里逐步呈现</p></div><select id="evaluation-task-select" aria-label="选择测试结果" hidden></select><span id="evaluation-case-status" class="evaluation-badge">等待开始</span></header>
@@ -292,6 +304,9 @@
           </div>
           <div id="login-push-slot">
             <div class="push-controls" id="push-controls" aria-label="远程推送" aria-describedby="push-hint">
+              <label class="button button-secondary converter-free-filter" id="login-non-personal-filter" title="仅选择非个人工作区；未获取到时重新登录，最多尝试三次">
+                <input id="login-require-non-personal" type="checkbox" />必须获取非个人工作区
+              </label>
               <div class="monitor-controls">
                 <span class="push-label" aria-hidden="true">测活</span>
                 <fieldset id="session-monitor-choice" class="push-target">
@@ -300,6 +315,9 @@
                   <label><input type="radio" name="session-monitor" value="on" />开启</label>
                 </fieldset>
               </div>
+              <label class="button button-secondary converter-free-filter" id="converter-free-filter" title="勾选后测活、展示、转换、下载和推送均跳过 free 账号。">
+                <input id="converter-skip-free" type="checkbox" checked />跳过 free<span id="converter-free-count" aria-hidden="true"></span>
+              </label>
               <div class="push-choice-controls">
                 <span class="push-label" aria-hidden="true">推送</span>
                 <fieldset id="push-target" class="push-target">
@@ -321,13 +339,13 @@
           <aside class="login-steps" aria-label="协议登录步骤">
             <strong>执行步骤</strong>
             <ol class="login-step-list" id="login-step-list">
-              <li class="login-step" data-login-stage="0"><span class="login-step-marker">1</span><span class="login-step-label">打开官网</span></li>
+              <li class="login-step" data-login-stage="0"><span class="login-step-marker">1</span><span class="login-step-label">连接 Codex</span></li>
               <li class="login-step" data-login-stage="1"><span class="login-step-marker">2</span><span class="login-step-label">输入账号</span></li>
-              <li class="login-step" data-login-stage="2"><span class="login-step-marker">3</span><span class="login-step-label">输入密码</span></li>
-              <li class="login-step" data-login-stage="3"><span class="login-step-marker">4</span><span class="login-step-label">输入 2FA</span></li>
-              <li class="login-step" data-login-stage="4"><span class="login-step-marker">5</span><span class="login-step-label">登录成功</span></li>
+              <li class="login-step" data-login-stage="2"><span class="login-step-marker">3</span><span class="login-step-label">验证密码</span></li>
+              <li class="login-step" data-login-stage="3"><span class="login-step-marker">4</span><span class="login-step-label">验证 2FA</span></li>
+              <li class="login-step" data-login-stage="4"><span class="login-step-marker">5</span><span class="login-step-label">获取首个 RT</span></li>
               <li class="login-step" data-login-stage="5"><span class="login-step-marker">6</span><span class="login-step-label">授权工作区</span></li>
-              <li class="login-step" data-login-stage="6"><span class="login-step-marker">7</span><span class="login-step-label">转为 RT</span></li>
+              <li class="login-step" data-login-stage="6"><span class="login-step-marker">7</span><span class="login-step-label">完成</span></li>
             </ol>
           </aside>
           <div class="login-main">
@@ -342,7 +360,7 @@
                 <input class="hidden" id="login-file-input" type="file" accept=".txt,text/plain" multiple />
                 <button class="button button-secondary" id="protocol-logout-all" type="button" title="优先复用浏览器缓存 Session，退出全部 ChatGPT 会话">退出全部会话</button>
                 <button class="button button-secondary" id="self-leave-workspaces" type="button" title="使用输入账号自己的令牌，退出已加入的非 owner 团队工作区">自踢</button>
-                <button class="button button-secondary" id="reset-login-totp" type="button" title="先禁用旧 2FA，再生成并验证新 2FA">重设 2FA</button>
+                <button class="button button-secondary" id="reset-login-totp" type="button" title="新密钥加密保存到浏览器后才激活；未完成的换绑优先恢复">重设 2FA</button>
               </div>
             </div>
             <section class="login-reset-output hidden" id="login-reset-output" aria-labelledby="login-reset-output-title">
@@ -350,8 +368,19 @@
                 <span id="login-reset-output-title">最新账号凭据</span>
                 <button class="button button-secondary" id="copy-login-reset-output" type="button">复制</button>
               </div>
-              <small>换绑成功后生成。每行格式：账号----密码----最新 2FA；请立即保存。</small>
+              <small>已确认换绑成功。每行格式：账号----密码----最新 2FA；请保存备份。</small>
               <pre id="login-reset-credentials"></pre>
+            </section>
+            <section class="login-reset-output hidden" id="login-reset-pending" aria-labelledby="login-reset-pending-title">
+              <div class="login-reset-output-head">
+                <span id="login-reset-pending-title">未完成的 2FA 换绑</span>
+                <button class="button button-secondary" id="resume-login-totp" type="button">继续 / 核对换绑</button>
+                <button class="button button-secondary" id="copy-login-reset-pending" type="button">复制新密钥凭据</button>
+                <button class="button button-secondary" id="download-login-reset-pending" type="button">下载换绑备份</button>
+              </div>
+              <small>请保留下面的新密钥和当前登录。待激活的账号会继续激活；已提交激活的账号只核对状态，不会再次换绑。</small>
+              <ul id="login-reset-pending-status" aria-live="polite"></ul>
+              <pre id="login-reset-pending-credentials"></pre>
             </section>
             <div class="login-controls">
               <fieldset id="login-workspace-mode" class="login-mode-group">
@@ -361,6 +390,7 @@
                   <label class="login-mode-option"><input type="radio" name="login-workspace-mode" value="all" checked />全部工作区 RT</label>
                 </div>
               </fieldset>
+              <p class="login-help" id="login-mode-description">直接使用 Codex OAuth 验证账号、密码和 2FA；获取个人 RT 后，复用本次登录授权全部工作区。</p>
             </div>
             <section class="login-proxy-card" aria-labelledby="login-proxy-title">
               <div class="login-proxy-head">
@@ -396,6 +426,13 @@
               <button class="button button-secondary" id="copy-login-failed" type="button" disabled>复制失败账号</button>
             </div>
             <div class="status-line" id="login-status" role="status" aria-live="polite">登录服务未开始。</div>
+            <div class="shared-account-links">
+              <p id="login-shared-status" role="status">登录成功后自动同步到其他功能，无需下载再导入。</p>
+              <button class="button button-secondary" id="use-shared-login-accounts" type="button">使用共享账号</button>
+              <button class="button button-secondary" data-account-destination="sub2api" type="button">去格式转换</button>
+              <button class="button button-secondary" data-account-destination="model-evaluation" type="button">去模型测试</button>
+              <button class="button button-secondary" data-account-destination="sub2api-tools" type="button">去批处理</button>
+            </div>
             <div id="login-push-feedback-slot">
               <div id="push-feedback" class="push-feedback" hidden>
                 <div class="push-feedback-head"><div class="status-line" id="push-status" role="status" aria-live="polite"></div><button class="button button-secondary hidden" id="reconcile-push" type="button" disabled>核对远端结果</button><button class="button button-secondary hidden" id="retry-push" type="button" disabled>重试失败项</button></div>
@@ -463,6 +500,8 @@
             <div>
               <h2 id="input-title">Session JSON</h2>
               <p id="input-subtitle">粘贴 ChatGPT Web session，或拖入一个或多个 JSON 文件。</p>
+              <p id="shared-account-status" class="shared-account-status" role="status">共享账号 0 个</p>
+              <button type="button" class="button button-secondary" id="shared-health-check">重新测活共享账号</button>
             </div>
           </div>
             <div class="panel-body">

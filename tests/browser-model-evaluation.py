@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import socket
@@ -9,6 +10,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import urlopen
 from playwright.sync_api import sync_playwright, expect
+from browser_evaluation_push import check_evaluation_push
+from browser_evaluation_logout import check_evaluation_logout, check_non_personal_control
+from browser_evaluation_copy import check_evaluation_copy
 
 ROOT = Path(__file__).resolve().parents[1]
 PARTIAL = '<html><body><svg width="1024" height="768" viewBox="0 0 1024 768"><rect width="1024" height="768" fill="#edf5f8"/><text x="72" y="100" font-size="30" fill="#24505a">Pelican in motion</text><g stroke="#24505a" stroke-width="8" fill="none"><circle cx="320" cy="540" r="100"/><circle cx="700" cy="540" r="100"/><path d="M320 540 440 340 550 540H320m120-200 260 200-80-260h-70"/></g>'
@@ -20,6 +24,7 @@ HTML = HTML.replace('<body>', '<body><style>@keyframes pulse{to{opacity:.4}} #cs
 def main():
     release = threading.Event()
     upstream_requests = []
+    candy_answer = '21'
 
     class Upstream(BaseHTTPRequestHandler):
         def handle(self):
@@ -46,7 +51,7 @@ def main():
                 self.wfile.flush()
 
             try:
-                text = PARTIAL if pelican else '推理过程\n答案：21'
+                text = PARTIAL if pelican else f'推理过程\n答案：{candy_answer}'
                 send({'choices': [{'index': 0, 'delta': {'content': text}}]} if chat else {'type': 'response.output_text.delta', 'delta': text})
                 if pelican:
                     release.wait(20)
@@ -54,7 +59,8 @@ def main():
                 if chat:
                     send({'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}], 'usage': {'completion_tokens': 88}})
                 else:
-                    send({'type': 'response.completed', 'response': {'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': HTML if pelican else text}]}], 'usage': {'output_tokens': 88}}})
+                    # Candy providers may omit repeated text after already streaming the full answer.
+                    send({'type': 'response.completed', 'response': {'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': HTML}]}] if pelican else [], 'usage': {'output_tokens': 88}}})
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
@@ -66,7 +72,7 @@ def main():
     url = f'http://127.0.0.1:{port}'
     with tempfile.TemporaryDirectory(prefix='model-evaluation-test-') as runtime:
         env = {**os.environ, 'SKIP_DOTENV': '1', 'NODE_ENV': 'development', 'CONTAINER': 'false',
-               'HOST': '127.0.0.1', 'PORT': str(port), 'RUNTIME_DIR': runtime, 'TASK_CONCURRENCY': '2', 'OPENAI_PROXY_URL': ''}
+               'HOST': '127.0.0.1', 'PORT': str(port), 'RUNTIME_DIR': runtime, 'TASK_CONCURRENCY': '10', 'OPENAI_PROXY_URL': ''}
         child = subprocess.Popen(['node', 'server.js'], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
             for _ in range(300):
@@ -82,10 +88,16 @@ def main():
                 raise RuntimeError('startup timed out')
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
+                check_evaluation_push(browser, url)
+                check_evaluation_copy(browser, url)
+                check_evaluation_logout(browser, url)
+                check_non_personal_control(browser, url)
                 page = browser.new_page(viewport={'width': 1440, 'height': 1100})
                 errors, requests = [], []
                 page.on('pageerror', lambda error: errors.append(str(error)))
-                page.route('**/api/session-health', lambda route: route.fulfill(json={'results': [{'status': 200}, {'status': 401}, {'status': 200}]}))
+                page.route('**/api/session-health', lambda route: route.fulfill(json={'results': [
+                    {'status': 200, 'usage': {'planType': 'plus'}}, {'status': 401}, {'status': 200},
+                    {'status': 200}, {'status': 200, 'usage': {'planType': 'free'}}, {'status': 200}]}))
 
                 def evaluate(route):
                     body = route.request.post_data_json
@@ -100,6 +112,9 @@ def main():
                 page.route('**/api/model-evaluation', evaluate)
                 page.goto(url)
                 page.wait_for_load_state('networkidle')
+                # This suite probes imported free plans to verify fresh usage overrides them.
+                page.locator('#converter-skip-free').uncheck()
+                expect(page.locator('#converter-skip-free')).to_be_enabled()
                 panel = page.locator('#model-evaluation')
                 start = panel.locator('[data-evaluation-start]')
                 expect(panel).to_be_hidden()
@@ -111,17 +126,35 @@ def main():
                 expect(page.locator('#evaluation-model')).to_have_value('gpt-6-astra')
                 page.locator('#evaluation-import').click()
                 accounts = [{'accessToken': 'fixture-token', 'user': {'email': email}} for email in ['first@example.com', 'failed@example.com', 'third@example.com']]
+                # Fresh usage overrides stale imported plans; fallback to Session, CPA and JWT plans.
+                accounts[0]['account'] = {'planType': 'free'}
+                accounts.extend([
+                    {'accessToken': 'fixture-token', 'user': {'email': 'free-session@example.com'}, 'account': {'planType': ' FREE '}},
+                    {'access_token': 'fixture-token', 'email': 'free-usage@example.com', 'plan_type': 'plus'},
+                    {'access_token': 'header.' + base64.urlsafe_b64encode(json.dumps({'https://api.openai.com/auth': {'chatgpt_plan_type': 'free'}}).encode()).decode().rstrip('=') + '.signature', 'email': 'free-jwt@example.com'},
+                ])
                 page.locator('#evaluation-import-text').fill(json.dumps(accounts))
                 page.locator('#evaluation-import-submit').click()
                 expect(page.locator('#evaluation-import-dialog')).not_to_be_visible()
                 expect(panel).to_be_visible()
                 expect(page.locator('#health-status')).to_contain_text('测活完成')
                 page.locator('#model-evaluation-tab').click()
-                expect(page.locator('#evaluation-account-count')).to_have_text('2 个可测试账号 / 3 个导入账号')
+                expect(page.locator('#evaluation-account-count')).to_have_text('2 个可测试账号 / 6 个导入账号 · 已跳过 3 个 free 账号')
+                expect(page.locator('#shared-account-status')).to_contain_text('测活通过 5 个')
+                expect(page.locator('#evaluation-include-pelican')).not_to_be_checked()
+                expect(page.locator('#evaluation-concurrency')).to_have_text('服务端并发：10')
+                start.click()
+                expect(page.locator('#evaluation-status')).to_contain_text('测试完成')
+                assert len(requests) == 2
+                assert {body['account']['email'] for body in requests} == {'first@example.com', 'third@example.com'}
+                assert all(body['question'] == 'candy' for body in requests)
+                expect(page.locator('#evaluation-case-title')).to_have_text('糖果题')
+                requests.clear()
+                page.locator('#evaluation-include-pelican').check()
                 start.click()
                 expect(page.locator('#evaluation-status')).to_contain_text('测试完成')
                 assert len(requests) == 4
-                assert all(body['model'] == 'gpt-6-astra' and body['account']['email'] != 'failed@example.com' for body in requests)
+                assert all(body['model'] == 'gpt-6-astra' and body['account']['email'] in ['first@example.com', 'third@example.com'] for body in requests)
                 expect(page.locator('#evaluation-status')).to_contain_text('失败 1')
                 expect(page.locator('#evaluation-progress-count')).to_have_text('4 / 4')
                 expect(page.frame_locator('#evaluation-preview-frame').locator('svg text')).to_have_text('Pelican in motion')
@@ -184,6 +217,26 @@ def main():
                 page.screenshot(path=str(output / 'completed-desktop.png'), full_page=True)
                 assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
 
+                page.locator('#evaluation-task-select').select_option('0')
+                expect(page.locator('#evaluation-case-status')).to_have_text('答案正确（21）')
+                expect(page.locator('#evaluation-case-error')).to_be_hidden()
+                expect(page.locator('#evaluation-output')).to_contain_text('答案：21')
+                expect(page.locator('#evaluation-output-note')).not_to_contain_text('部分内容')
+                expect(page.locator('#evaluation-status')).to_contain_text('请求失败 0')
+
+                candy_answer = '29'
+                page.locator('#evaluation-include-pelican').uncheck()
+                start.click()
+                expect(page.locator('#evaluation-status')).to_contain_text('测试完成')
+                expect(page.locator('#evaluation-case-status')).to_have_text('答案错误')
+                expect(page.locator('#evaluation-case-error')).to_be_hidden()
+                expect(page.locator('#evaluation-output')).to_contain_text('答案：29')
+                expect(page.locator('#evaluation-output-note')).not_to_contain_text('部分内容')
+                expect(page.locator('#evaluation-status')).to_contain_text('答案错误 1')
+                expect(page.locator('#evaluation-status')).to_contain_text('请求失败 0')
+
+                candy_answer = '21'
+                page.locator('#evaluation-include-pelican').check()
                 page.locator('#evaluation-protocol').select_option('chat')
                 release.clear()
                 start.click()
@@ -208,7 +261,8 @@ def main():
                 expect(panel).to_be_visible()
                 expect(page.locator('#evaluation-api-key')).to_have_value('')
                 page.locator('input[name="evaluation-source"][value="accounts"]').check()
-                expect(start).to_be_disabled()
+                expect(page.locator('#evaluation-account-count')).to_have_text('2 个可测试账号 / 6 个导入账号 · 已跳过 3 个 free 账号')
+                expect(start).to_be_enabled()
                 page.locator('#evaluation-import').click()
                 page.locator('#evaluation-import-text').fill('{invalid')
                 page.locator('#evaluation-import-submit').click()
@@ -216,8 +270,52 @@ def main():
                 page.locator('#evaluation-import-text').fill('')
                 page.locator('#evaluation-import-files').set_input_files({'name': 'accounts.json', 'mimeType': 'application/json', 'buffer': json.dumps(accounts).encode()})
                 page.locator('#evaluation-import-submit').click()
-                expect(page.locator('#evaluation-account-count')).to_have_text('2 个可测试账号 / 3 个导入账号')
+                expect(page.locator('#evaluation-account-count')).to_have_text('2 个可测试账号 / 6 个导入账号 · 已跳过 3 个 free 账号')
                 expect(panel).to_be_visible()
+                expect(page.locator('#evaluation-include-pelican')).not_to_be_checked()
+                page.unroute('**/api/session-health')
+                page.route('**/api/session-health', lambda route: route.fulfill(json={'results': [{'status': 200}] * 12}))
+                page.locator('#evaluation-import').click()
+                batch = [{'accessToken': 'fixture-token', 'user': {'email': f'batch-{i}@example.com'}} for i in range(12)]
+                page.locator('#evaluation-import-text').fill(json.dumps(batch))
+                page.locator('#evaluation-import-submit').click()
+                expect(page.locator('#evaluation-account-count')).to_have_text('12 个可测试账号 / 12 个导入账号')
+                pending = []
+                page.route('**/api/model-evaluation', lambda route: pending.append(route))
+                start.click()
+                for _ in range(100):
+                    if len(pending) >= 10:
+                        break
+                    page.wait_for_timeout(50)
+                assert len(pending) == 10, len(pending)
+                expect(page.locator('#evaluation-push-passed')).to_be_disabled()
+                page.wait_for_timeout(200)
+                assert len(pending) == 10
+                assert all(route.request.post_data_json['question'] == 'candy' for route in pending)
+                pending[0].fulfill(content_type='text/event-stream', body='data: ' + json.dumps({'type': 'complete', 'status': 'passed', 'output': '答案：21', 'durationMs': 1}) + '\n\n')
+                for _ in range(100):
+                    if len(pending) >= 11:
+                        break
+                    page.wait_for_timeout(50)
+                assert len(pending) == 11
+                expect(page.locator('#evaluation-push-passed')).to_be_disabled()
+                panel.locator('[data-evaluation-stop]').click()
+                expect(page.locator('#evaluation-status')).to_contain_text('已停止')
+                expect(page.locator('#evaluation-push-passed')).to_be_enabled()
+                expect(page.locator('#evaluation-push-passed')).to_contain_text('（1）')
+                for route in pending[1:]:
+                    route.abort()
+                # A healthy free-only import must disable testing, including programmatic submit.
+                page.unroute('**/api/session-health')
+                page.route('**/api/session-health', lambda route: route.fulfill(json={'results': [{'status': 200, 'usage': {'planType': 'free'}}]}))
+                page.locator('#evaluation-import').click()
+                page.locator('#evaluation-import-text').fill(json.dumps([accounts[3]]))
+                page.locator('#evaluation-import-submit').click()
+                expect(page.locator('#evaluation-account-count')).to_have_text('0 个可测试账号 / 1 个导入账号 · 已跳过 1 个 free 账号')
+                expect(start).to_be_disabled()
+                page.locator('#evaluation-form').dispatch_event('submit')
+                expect(page.locator('#evaluation-status')).to_contain_text('没有可测试账号')
+                assert len(pending) == 11
                 assert not errors, errors
                 browser.close()
                 print('PASS: inline paste/file import, healthy-only filtering, Markdown/raw and injection protection, result switcher, first-screen preview, CSS/SMIL pause/resume, stream pause persistence, API modes, cancellation and key privacy')

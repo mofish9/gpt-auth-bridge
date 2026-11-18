@@ -1,12 +1,15 @@
 import { readEvaluationEvents } from './evaluation-stream.js';
 import { evaluationPreviewDocument } from './evaluation-preview.js';
+import { healthCredentialKey } from './account-workspace.js';
+import { evaluationAccountOwner, evaluationLogoutAccounts, evaluationResultOwners, evaluationAccountLines } from './evaluation-accounts.js';
 
 const TITLES = { candy: '糖果题', pelican: '鹈鹕骑自行车' };
 const STATUS = { queued: '排队中', connecting: '连接模型', waiting: '等待首字', generating: '生成中', passed: '答案正确（21）', wrong_answer: '答案错误', invalid_format: '格式不完整', manual_review: '待人工评审', error: '请求失败', cancelled: '已停止' };
 const ACTIVE = ['queued', 'connecting', 'waiting', 'generating'];
 const seconds = ms => ms == null ? '—' : `${(ms / 1000).toFixed(1)} s`;
 
-export function initializeModelEvaluation({ request, getEligibility, getHeaders, isWorkspaceCurrent, onImport }) {
+export function initializeModelEvaluation({ request, getEligibility, getHeaders, isWorkspaceCurrent, onImport, getConcurrency,
+  onPushPassed, onLogoutFailed, getAccounts = () => getEligibility().accounts, getLoginAccounts = () => ({}), isPushBusy = () => false }) {
   const panel = document.querySelector('#model-evaluation');
   if (!panel) return { reset() {}, refresh() {} };
   const find = id => panel.querySelector(`#evaluation-${id}`);
@@ -16,7 +19,9 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
   const frame = find('preview-frame'), dialog = find('preview-dialog'), largeFrame = find('large-frame');
   let controller, timer, generation = 0, jobs = [], selected = -1;
   let lastPreview = '', lastPreviewAt = 0, previewTimer, previewJob = null;
-  let paused = false, rawOutput = false, importing = false;
+  let paused = false, rawOutput = false, importing = false, loggingOut = false;
+  let copying = false;
+  const logoutAccounts = () => mode() === 'accounts' ? evaluationLogoutAccounts(jobs, getAccounts()) : [];
   const markdown = window.markdownit({ html: false, breaks: true, linkify: false });
   markdown.disable('image');
   const importDialog = find('import-dialog');
@@ -34,16 +39,40 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
   observer.observe(largeFrame.parentElement);
   observer.observe(document.querySelector('.topbar'));
 
+  function passedAccounts() {
+    if (mode() !== 'accounts') return [];
+    const passed = new Set(jobs.filter(job => job.question === 'candy' && job.status === 'passed').map(job => job.credentialKey));
+    return [...new Map(getEligibility().accounts.filter(account => passed.has(healthCredentialKey(account)))
+      .map(account => [healthCredentialKey(account), account])).values()];
+  }
+
   function refresh() {
     const eligibility = getEligibility();
     find('account-count').textContent = eligibility.pending ? `正在测活 ${eligibility.total} 个账号…`
-      : `${eligibility.accounts.length} 个可测试账号 / ${eligibility.total} 个导入账号`;
+      : `${eligibility.accounts.length} 个可测试账号 / ${eligibility.total} 个导入账号${eligibility.skippedFree ? ` · 已跳过 ${eligibility.skippedFree} 个 free 账号` : ''}`;
     const apiMode = mode() === 'api';
     find('accounts-source').hidden = apiMode;
     find('api-source').hidden = !apiMode;
-    start.disabled = Boolean(controller) || (!apiMode && !eligibility.accounts.length);
-    fields.disabled = Boolean(controller);
+    start.disabled = Boolean(controller) || loggingOut || isPushBusy() || (!apiMode && !eligibility.accounts.length);
+    fields.disabled = Boolean(controller) || loggingOut;
     stop.disabled = !controller;
+    const concurrency = getConcurrency();
+    find('concurrency').textContent = Number.isInteger(concurrency) ? `服务端并发：${concurrency}` : '正在加载服务端并发配置';
+    if (!Number.isInteger(concurrency) || concurrency < 1) start.disabled = true;
+    const passedCount = passedAccounts().length;
+    const pushing = isPushBusy();
+    find('push-passed').disabled = Boolean(controller) || importing || pushing || loggingOut || !passedCount;
+    find('push-passed').textContent = `推送答案正确账号到 Sub2API（${passedCount}）`;
+    find('sub2-config').disabled = pushing;
+    const logoutCount = logoutAccounts().length;
+    find('logout-failed').disabled = Boolean(controller) || importing || pushing || loggingOut || !logoutCount;
+    find('logout-failed').textContent = loggingOut ? '正在退出会话…' : `退出非答案正确账号会话（${logoutCount}）`;
+    for (const [outcome, label] of [['success', '成功'], ['failed', '失败']]) {
+      const count = apiMode ? 0 : evaluationResultOwners(jobs, outcome).length;
+      const button = find(`copy-${outcome}`);
+      button.disabled = Boolean(controller) || importing || loggingOut || copying || !count;
+      button.textContent = `复制${label}账号（${count}）`;
+    }
   }
 
   function chooseView(view) {
@@ -145,6 +174,9 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
     const empty = document.createElement('p'); empty.className = 'evaluation-queue-empty'; empty.textContent = '开始后，点击任务查看生成过程。'; results.append(empty);
     find('queue-count').textContent = '0 项'; find('progress-count').textContent = '0 / 0'; find('progress').value = 0;
     status.textContent = '准备就绪，选择测试来源后开始。';
+    find('logout-status').hidden = true;
+    find('logout-status').textContent = '';
+    clearCopyStatus();
     find('api-key').value = '';
     if (dialog.open) dialog.close(); largeFrame.removeAttribute('srcdoc');
     paused = false; syncPause();
@@ -188,7 +220,7 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
   }
   for (const name of ['pause', 'large-pause']) find(name).addEventListener('click', () => { paused = !paused; syncPause(); });
   for (const target of [frame, largeFrame]) target.addEventListener('load', syncPause);
-  panel.querySelectorAll('input[name="evaluation-source"]').forEach(input => input.addEventListener('change', refresh));
+  panel.querySelectorAll('input[name="evaluation-source"]').forEach(input => input.addEventListener('change', () => { clearCopyStatus(); refresh(); }));
   for (const name of ['preview', 'output']) {
     find(`${name}-tab`).addEventListener('click', () => chooseView(name));
     find(`${name}-tab`).addEventListener('keydown', event => {
@@ -205,9 +237,68 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
   find('close-preview').addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => largeFrame.removeAttribute('srcdoc'));
   stop.addEventListener('click', () => { controller?.abort(); stop.disabled = true; status.textContent = '正在停止，保留已生成内容…'; });
+  find('push-passed').addEventListener('click', async () => {
+    if (controller || importing || loggingOut || isPushBusy()) return;
+    const accounts = passedAccounts();
+    if (!accounts.length) return;
+    await onPushPassed(accounts);
+    refresh();
+  });
+
+  function clearCopyStatus() {
+    const feedback = find('copy-status');
+    feedback.hidden = true; feedback.textContent = '';
+    feedback.classList.remove('is-ok', 'is-error');
+  }
+
+  for (const [outcome, label] of [['success', '成功'], ['failed', '失败']]) {
+    find(`copy-${outcome}`).addEventListener('click', async () => {
+      if (controller || importing || loggingOut || copying || mode() !== 'accounts') return;
+      const owners = evaluationResultOwners(jobs, outcome);
+      if (!owners.length) return;
+      const isCurrent = isWorkspaceCurrent(), run = generation;
+      const feedback = find('copy-status');
+      copying = true; clearCopyStatus(); refresh();
+      try {
+        const lines = evaluationAccountLines(owners, getLoginAccounts());
+        await navigator.clipboard.writeText(lines.join('\n'));
+        if (!isCurrent() || run !== generation || mode() !== 'accounts') return;
+        const emailOnly = lines.filter((line, index) => line === owners[index]).length;
+        feedback.textContent = `已复制 ${lines.length} 个${label}账号。${emailOnly ? `其中 ${emailOnly} 个无登录凭据，仅复制邮箱。` : ''}`;
+        feedback.classList.add('is-ok'); feedback.hidden = false;
+      } catch {
+        if (!isCurrent() || run !== generation || mode() !== 'accounts') return;
+        feedback.textContent = '复制失败，请允许浏览器访问剪贴板后重试。';
+        feedback.classList.add('is-error'); feedback.hidden = false;
+      } finally { copying = false; if (isCurrent()) refresh(); }
+    });
+  }
+
+  find('logout-failed').addEventListener('click', async () => {
+    if (controller || importing || loggingOut || isPushBusy()) return;
+    const accounts = logoutAccounts();
+    if (!accounts.length || !window.confirm(`确认退出本轮已测试但未答对的 ${accounts.length} 个登录账号的全部 ChatGPT 会话？\n\n包含请求失败账号；同一邮箱有任一工作区答对则保留。退出成功后清理本地凭据并暂停自动重登。`)) return;
+    const isCurrent = isWorkspaceCurrent();
+    const run = generation;
+    const feedback = find('logout-status');
+    loggingOut = true; refresh();
+    feedback.hidden = false; feedback.textContent = `正在退出 ${accounts.length} 个账号的全部会话…`;
+    try {
+      const results = await onLogoutFailed(accounts);
+      if (!isCurrent() || run !== generation) return;
+      const succeeded = new Set(results.filter(row => row.ok).map(evaluationAccountOwner));
+      jobs.forEach(job => { if (succeeded.has(job.owner)) job.loggedOut = true; });
+      const failures = results.filter(row => !row.ok);
+      feedback.textContent = `退出完成：成功 ${succeeded.size}，失败 ${failures.length}。${failures.length ? '再次点击仅重试失败账号。' : ''}${failures.map(row => `${row.email}：${row.error || '退出失败'}`).join('；')}`;
+    } catch (error) { if (isCurrent() && run === generation) feedback.textContent = `退出失败：${error.message}`; }
+    finally { loggingOut = false; if (isCurrent()) refresh(); }
+  });
 
   find('form').addEventListener('submit', async event => {
-    event.preventDefault(); if (controller) return;
+    event.preventDefault(); if (controller || loggingOut || isPushBusy()) return;
+    const concurrency = getConcurrency();
+    if (!Number.isInteger(concurrency) || concurrency < 1) { status.textContent = '服务端并发配置尚未加载，请刷新页面后重试。'; return; }
+    const questions = find('include-pelican').checked ? ['candy', 'pelican'] : ['candy'];
     const chosenModel = model.value.trim();
     if (!/^[a-zA-Z0-9._-]{1,100}$/.test(chosenModel)) { status.textContent = '请选择或输入有效模型名称。'; return; }
     const apiMode = mode() === 'api';
@@ -217,19 +308,23 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
       catch { status.textContent = '请填写有效的 HTTP(S) API 地址和 API Key。'; return; }
     }
     const accounts = apiMode ? [null] : [...getEligibility().accounts];
-    if (!accounts.length) { status.textContent = '没有测活通过的账号，请先在格式转换中完成测活。'; return; }
+    if (!accounts.length) { status.textContent = '没有可测试账号：仅测试测活通过的非 free 账号，请导入账号或重新测活。'; return; }
     const current = new AbortController(); controller = current;
+    clearCopyStatus();
+    find('logout-status').hidden = true;
+    find('logout-status').textContent = '';
     const run = ++generation, ownsWorkspace = isWorkspaceCurrent();
     const active = () => run === generation && ownsWorkspace() && !current.signal.aborted;
     results.replaceChildren(); clearTimeout(previewTimer);
-    jobs = accounts.flatMap((account, index) => Object.keys(TITLES).map(question => {
+    jobs = accounts.flatMap((account, index) => questions.map(question => {
       const label = apiMode ? new URL(api.baseUrl).host : account.email || `账号 ${index + 1}`;
       const button = document.createElement('button'); button.type = 'button'; button.className = 'evaluation-task';
       const title = document.createElement('strong'); title.textContent = TITLES[question];
       const target = document.createElement('small'); target.textContent = label; target.title = label;
       const stateLabel = document.createElement('span'); stateLabel.className = 'evaluation-task-status'; stateLabel.textContent = '排队中';
       button.append(title, target, stateLabel); results.append(button);
-      return { account, question, label, model: chosenModel, status: 'queued', output: '', firstTokenMs: null, button, stateLabel };
+      return { account, credentialKey: account ? healthCredentialKey(account) : '', owner: evaluationAccountOwner(account), question, label,
+        model: chosenModel, status: 'queued', output: '', firstTokenMs: null, button, stateLabel };
     }));
     find('task-select').replaceChildren(); find('task-select').hidden = false;
     jobs.forEach((job, index) => {
@@ -237,12 +332,12 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
       job.option = document.createElement('option'); job.option.value = String(index); find('task-select').append(job.option);
     });
     find('queue-count').textContent = `${jobs.length} 项`;
-    selectJob(1); jobs.forEach(updateJob); refresh();
-    status.textContent = `正在测试 ${accounts.length} 个${apiMode ? 'API 接入' : '测活通过的账号'}，每次并行执行 2 题。`;
+    selectJob(questions.includes('pelican') ? 1 : 0); jobs.forEach(updateJob); refresh();
+    status.textContent = `正在测试 ${accounts.length} 个${apiMode ? 'API 接入' : '测活通过的账号'}，服务端配置并发 ${concurrency}。`;
     timer = setInterval(renderMetrics, 500);
     let cursor = 0;
     try {
-      await Promise.all(Array.from({ length: Math.min(2, jobs.length) }, async () => {
+      await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, async () => {
         while (cursor < jobs.length && active()) {
           const job = jobs[cursor++]; job.status = 'connecting'; job.startedAt = Date.now(); updateJob(job);
           let complete = false;
@@ -282,7 +377,7 @@ export function initializeModelEvaluation({ request, getEligibility, getHeaders,
           job.account = null; updateJob(job);
         });
         const count = state => jobs.filter(job => job.status === state).length;
-        status.textContent = `${current.signal.aborted ? '已停止' : '测试完成'}：答案正确 ${count('passed')}，待评审 ${count('manual_review')}，失败 ${count('error') + count('wrong_answer') + count('invalid_format')}${count('cancelled') ? `，已停止 ${count('cancelled')}` : ''}。`;
+        status.textContent = `${current.signal.aborted ? '已停止' : '测试完成'}：答案正确 ${count('passed')}，答案错误 ${count('wrong_answer')}，格式不完整 ${count('invalid_format')}，待评审 ${count('manual_review')}，请求失败 ${count('error')}${count('cancelled') ? `，已停止 ${count('cancelled')}` : ''}。`;
         controller = null; refresh(); renderSelected(true);
       }
     }

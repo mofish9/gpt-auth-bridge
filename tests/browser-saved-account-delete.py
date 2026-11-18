@@ -1,23 +1,27 @@
 """Browser regression for deleting one saved protocol account locally."""
 import json
+import runpy
+from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
+
+ROOT = Path(__file__).resolve().parents[1]
+fixture_page = runpy.run_path(str(ROOT / 'tests/browser-durability.py'))['fixture_page']
 
 
 def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
-        errors = []
-        page.on('pageerror', lambda error: errors.append(str(error)))
+        context, page, errors, _ = fixture_page(browser)
         deleted = {
             'id': 'delete-me', 'email': 'delete@example.com', 'password': 'deleted-password',
             'two_factor_secret': 'JBSWY3DPEHPK3PXP', 'session_access_token': 'fixture-session',
-            'openai_rt': 'fixture-personal-rt', 'updatedAt': 1780000000000,
+            'openai_rt': 'fixture-personal-rt', 'openai_access_token': 'fixture-deleted-access',
+            'openai_account_id': 'delete-workspace', 'updatedAt': 1780000000000,
         }
         kept = {
             'id': 'keep-me', 'email': 'keep@example.com', 'password': 'keep-password',
             'two_factor_secret': 'JBSWY3DPEHPK3PXP', 'openai_rt': 'fixture-keep-rt',
+            'openai_access_token': 'fixture-kept-access', 'openai_account_id': 'keep-workspace',
         }
         deleted_push = {'name': deleted['email'], 'platform': 'openai', 'type': 'oauth',
                         'credentials': {'email': deleted['email'], 'chatgpt_account_id': 'delete-workspace',
@@ -26,7 +30,6 @@ def main():
                      'credentials': {'email': kept['email'], 'chatgpt_account_id': 'keep-workspace',
                                      'access_token': 'fixture-access', 'refresh_token': 'fixture-refresh'}}
         try:
-            page.goto('http://127.0.0.1:4173/')
             page.evaluate('''async ({deleted, kept, deletedPush, keptPush}) => {
                 await browserWorkspace.save({state: {
                     format: 'protocol-login', browserAccounts: [deleted, kept],
@@ -69,6 +72,13 @@ def main():
             assert 'delete@example.com' not in state.get('conversionInput', {}).get('text', '')
             assert 'delete@example.com' not in page.locator('#login-accounts').input_value()
             assert 'deleted-password' not in json.dumps(saved)
+            page.locator('.top-nav [data-format="sub2api"]').click()
+            expect(page.locator('#account-body')).to_contain_text('keep@example.com')
+            expect(page.locator('#account-body')).not_to_contain_text('delete@example.com')
+            expect(page.locator('#output')).not_to_contain_text('fixture-deleted-access')
+            page.reload()
+            expect(page.locator('#account-body')).to_contain_text('keep@example.com')
+            expect(page.locator('#account-body')).not_to_contain_text('delete@example.com')
             assert not errors, errors
         finally:
             context.close()

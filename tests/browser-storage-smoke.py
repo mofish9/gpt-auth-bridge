@@ -83,6 +83,7 @@ def main():
                                   body="".join(f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events))
 
                 page.route("**/api/v2/accounts/protocol-login-pipeline", oauth)
+                page.route('**/api/session-health', lambda route: route.fulfill(json={'results': [{'status': 200} for _ in route.request.post_data_json['accounts']]}))
                 page.goto(url)
                 page.wait_for_function("() => !!window.browserWorkspace")
                 expect(page.locator("#sub2api-concurrency")).to_have_value("50")
@@ -182,7 +183,7 @@ def main():
                 page.evaluate("""() => pendingStream.enqueue(new TextEncoder().encode(
                     'event: account_log\\ndata: {"email":"late@example.com","msg":"Codex OAuth：登录并获取 refresh_token"}\\n\\n'
                     + 'event: account_log\\ndata: {"email":"late@example.com","msg":"提交账号密码"}\\n\\n'))""")
-                expect(page.locator(".login-account-stage")).to_have_text("输入密码")
+                expect(page.locator(".login-account-stage")).to_have_text("验证密码")
                 page.once("dialog", lambda dialog: dialog.accept())
                 page.locator("#clear-browser-data").click()
                 expect(page.locator("#browser-storage-status")).to_have_text("所有数据已清空")
@@ -279,9 +280,16 @@ def main():
                     expect(screen.locator('#push-feedback')).to_be_hidden()
                     if width >= 1024:
                         title = screen.locator('.login-title-row').bounding_box()
+                        heading = screen.locator('.login-heading').bounding_box()
                         push = screen.locator('#push-controls').bounding_box()
-                        assert push['x'] >= title['x'] + title['width']
-                        assert abs(push['y'] - title['y']) < 30
+                        # Additional workspace controls may wrap at tablet widths.
+                        beside = push['x'] >= heading['x'] + heading['width'] and abs(push['y'] - title['y']) < 30
+                        below = push['y'] >= heading['y'] + heading['height']
+                        assert beside or below, (width, heading, push)
+                        header = screen.locator('.login-header').bounding_box()
+                        assert push['x'] >= header['x']
+                        assert push['x'] + push['width'] <= header['x'] + header['width']
+                        assert push['y'] + push['height'] <= header['y'] + header['height']
                     if os.environ.get('PUSH_UI_SCREENSHOTS'):
                         destination = Path(os.environ['PUSH_UI_SCREENSHOTS'])
                         destination.mkdir(parents=True, exist_ok=True)

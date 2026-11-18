@@ -1,6 +1,8 @@
 import { splitPasswordTotpLine } from './login-account-format.js';
 import { initializeTeamCheckout } from './team-checkout.js';
 import { initializeModelEvaluation } from './model-evaluation.js';
+import { evaluationAccountOwner } from './evaluation-accounts.js';
+import { projectLoginAccounts, sharedAccountKey, healthCredentialKey, mergeSharedAccounts, loginCredentialLines } from './account-workspace.js';
 import { validationFailureHint, validationFailureFields, validationFailureLabel } from './validation-failure.js';
 import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent } from './operation-contract.js';
 
@@ -41,6 +43,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     toolParsed: null,
     toolRecords: [],
     browserAccounts: [],
+    linkedAccountKeys: [],
     browserSettings: {},
     cpaSettings: {},
     pushRetry: null,
@@ -94,8 +97,12 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   let monitorLastSummary = '';
   let selfLeaveBusy = false;
   let protocolLogoutBusy = false;
+  let evaluationLogoutBusy = false;
   let healthController;
   let evaluationEligibility = { accounts: [], total: 0, pending: false };
+  const sharedHealth = new Map();
+  const freshHealth = new Set();
+  const knownHealthPlans = new Map();
 
   let browserStorageReady = false;
   let browserStorageAvailable = false;
@@ -122,8 +129,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       })),
     } };
   }
-  function acceptBrowserState(snapshot) {
+  async function acceptBrowserState(snapshot) {
     if (!snapshot || browserStorageCleared) return;
+    const isCurrent = workspaceTaskIsCurrent();
+    const previousSources = JSON.stringify(projectLoginAccounts(state.browserAccounts));
     const accounts = new Map(state.browserAccounts.map(account => [String(account.id), account]));
     for (const account of snapshot.accounts || []) accounts.set(String(account.id), account);
     state.browserAccounts = [...accounts.values()];
@@ -132,9 +141,12 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     }
     if (snapshot.settings?.sub2apiSettings) restoreSub2apiAccountConfig();
     renderSavedAccounts();
+    rememberLoginAccountKeys();
+    renderTotpResetRecovery();
     // Credentials are a durable boundary even when they arrive as a partial SSE
     // snapshot. The caller waits before displaying completion or sending work.
-    return persistBrowserWorkspace(true, true);
+    await persistBrowserWorkspace(true, true);
+    if (isCurrent() && previousSources !== JSON.stringify(projectLoginAccounts(state.browserAccounts))) scheduleConvert();
   }
   function browserFields() {
     return [...document.querySelectorAll('input, textarea, select')]
@@ -161,7 +173,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     retained.loginProgress = [];
     const ids = new Set(['login-proxy-local-port', 'login-proxy-pool', 'sub2api-models', 'sub2api-concurrency',
       'sub2api-load-factor', 'sub2api-priority', 'sub2api-fingerprint-mode', 'download-scope', 'health-filter',
-      'usage-filter', 'sub2api-operation', 'split-scope']);
+      'usage-filter', 'sub2api-operation', 'split-scope', 'converter-skip-free', 'login-require-non-personal']);
     const names = new Set(['push-target', 'login-proxy-mode', 'login-workspace-mode', 'session-monitor']);
     const fields = browserFields().filter(field => ids.has(field.id) || names.has(field.name)
       || (field.id && document.getElementById(field.id)?.closest('.push-config')));
@@ -261,6 +273,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     pushControls: document.querySelector('#push-controls'),
     pushTarget: document.querySelector('#push-target'),
     pushConverted: document.querySelector('#push-converted'),
+    converterSkipFree: document.querySelector('#converter-skip-free'),
+    loginRequireNonPersonal: document.querySelector('#login-require-non-personal'),
+    loginNonPersonalFilter: document.querySelector('#login-non-personal-filter'),
+    converterFreeFilter: document.querySelector('#converter-free-filter'),
+    converterFreeCount: document.querySelector('#converter-free-count'),
     retryPush: document.querySelector('#retry-push'),
     reconcilePush: document.querySelector('#reconcile-push'),
     pushOperationHistory: document.querySelector('#push-operation-history'),
@@ -272,6 +289,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     converterPushSlot: document.querySelector('#converter-push-slot'),
     loginPushFeedbackSlot: document.querySelector('#login-push-feedback-slot'),
     converterPushFeedbackSlot: document.querySelector('#converter-push-feedback-slot'),
+    evaluationPushFeedbackSlot: document.querySelector('#evaluation-push-feedback-slot'),
     formatToolbar: document.querySelector('#format-toolbar'),
     pushResults: document.querySelector('#push-results'),
     pushResultDetails: document.querySelector('#push-result-details'),
@@ -639,6 +657,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         }
         visited.add(item);
 
+        if (item.session_access_token || item.session_json || item.openai_access_token || item.business_openai_access_token || item.business_workspace_credentials?.length) {
+          found.push(...projectLoginAccounts([item]).map(source => ({ ...source, sourceName, path })));
+          return;
+        }
+
         const token = firstNonEmpty(
           item.accessToken,
           item.access_token,
@@ -982,8 +1005,8 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     return new Set(candidates.flatMap(extractEmails));
   }
 
-  function buildSub2apiToolResult(text, recordsOverride = null) {
-    const parsed = parseSub2apiRecords(text);
+  function buildSub2apiToolResult(text, recordsOverride = null, parsedInput = null) {
+    const parsed = { ...(parsedInput || parseSub2apiRecords(text)) };
     if (recordsOverride) parsed.records = recordsOverride;
     const operation = elements.sub2apiOperation.value || "json-to-txt";
     const records = operation === "json-to-txt" ? reorderSub2apiRecords(parsed.records) : parsed.records;
@@ -1116,6 +1139,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       record.providerSpecificData?.chatgptAccountId,
       record.providerSpecificData?.chatgpt_account_id,
       record.credentials?.chatgpt_account_id,
+      record.credentials?.account_id,
       auth.chatgpt_account_id,
       idAuth.chatgpt_account_id,
       record.provider === "codex" ? record.id : undefined,
@@ -1375,7 +1399,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   function canLogoutAllSessions() {
     return state.format === "sub2api"
       && healthComplete()
-      && state.health.some((item) => item?.status === 200)
+      && state.converted.some((item, index) => !skipFreeConverted(item) && state.health[index]?.status === 200)
       && !state.logoutInProgress;
   }
 
@@ -1406,7 +1430,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     if (!canLogoutAllSessions()) return;
     const accounts = state.converted
       .map((item, index) => ({ item, result: state.health[index], index }))
-      .filter(({ result }) => result?.status === 200)
+      .filter(({ item, result }) => !skipFreeConverted(item) && result?.status === 200)
       .map(({ item, index }) => ({
         index,
         email: item.email || item.name || `account-${index + 1}`,
@@ -1499,7 +1523,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function hasToolUsageSnapshots() {
-    return state.toolRecords.some((record, index) => Boolean(recordUsage(record, state.health[index])));
+    return state.toolRecords.some((record, index) => !skipFreeToolRecord(record) && Boolean(recordUsage(record, state.health[index])));
   }
 
   function usageMatchesFilter(record, result) {
@@ -1519,9 +1543,9 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function selectedToolRecords() {
-    if (elements.sub2apiOperation.value === "split") return state.toolRecords;
-    if (!toolHealthComplete()) return state.toolRecords;
     return state.toolRecords.filter((record, index) => {
+      if (skipFreeToolRecord(record)) return false;
+      if (elements.sub2apiOperation.value === "split" || !toolHealthComplete()) return true;
       const result = state.health[index];
       if (elements.downloadScope.value === "non200") return result?.status !== 200;
       return (elements.downloadScope.value === "all" || result?.status === 200) && usageMatchesFilter(record, result);
@@ -1529,9 +1553,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function selectedConverted() {
-    if (!healthComplete() || elements.downloadScope.value === "all") return state.converted;
     const include200 = elements.downloadScope.value !== "non200";
-    return state.converted.filter((_, index) => include200 ? state.health[index]?.status === 200 : state.health[index]?.status !== 200);
+    return state.converted.filter((item, index) => !skipFreeConverted(item)
+      && (!healthComplete() || elements.downloadScope.value === "all"
+        || (include200 ? state.health[index]?.status === 200 : state.health[index]?.status !== 200)));
   }
 
   function formatDuration(seconds) {
@@ -1614,6 +1639,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       const filtered = state.toolRecords
         .map((record, index) => ({ record, result: state.health[index] }))
         .filter(({ record, result }) => {
+          if (skipFreeToolRecord(record)) return false;
           if (!show200) return result?.status !== 200;
           return result?.status === 200 && usageMatchesFilter(record, result);
         });
@@ -1632,7 +1658,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     const show200 = elements.healthFilter.value !== "non200";
     const filtered = state.converted
       .map((item, index) => ({ item, result: state.health[index] }))
-      .filter(({ result }) => show200 ? result?.status === 200 : result?.status !== 200);
+      .filter(({ item, result }) => !skipFreeConverted(item) && (show200 ? result?.status === 200 : result?.status !== 200));
     elements.healthBody.innerHTML = filtered
       .map(({ item, result }) => healthRow(item, result, state.logoutResults.find((logout) => logout.index === result?.index)))
        .join("") || `<tr><td colspan="8" class="empty">没有${show200 ? " HTTP 200" : "非 200"}账号。</td></tr>`;
@@ -1649,54 +1675,134 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     catch { throw new Error(`服务返回非 JSON 响应（HTTP ${response.status}）`); }
   }
 
-  async function startHealthCheck() {
+  function convertedHealthAccount(item) {
+    return { email: item.cpa.email, accessToken: item.cpa.access_token, accountId: item.cpa.account_id };
+  }
+
+  function convertedPlanType(item) {
+    return accountPlanType(convertedHealthAccount(item), item.cpa.plan_type);
+  }
+
+  function accountPlanType(account, fallback) {
+    const key = healthCredentialKey(account);
+    const health = sharedHealth.get(key);
+    return String(firstNonEmpty(health?.usage?.planType, knownHealthPlans.get(key), fallback) || '').trim().toLowerCase();
+  }
+
+  function skipFreeConverted(item) {
+    return elements.converterSkipFree.checked && convertedPlanType(item) === 'free';
+  }
+
+  function skipFreeToolRecord(record) {
+    return elements.converterSkipFree.checked && accountPlanType(toolHealthAccount(record), firstNonEmpty(
+      record.planType, record.account?.credentials?.plan_type, record.account?.plan_type, record.account?.extra?.plan_type,
+    )) === 'free';
+  }
+
+  function healthCandidates(includeSkipped = false) {
+    return state.toolRecords.length
+      ? state.toolRecords.filter(record => includeSkipped || !skipFreeToolRecord(record)).map(toolHealthAccount)
+      : state.converted.filter(item => includeSkipped || !skipFreeConverted(item)).map(convertedHealthAccount);
+  }
+
+  function renderHealthSummary() {
+    const accounts = healthCandidates();
+    const skipped = healthCandidates(true).length - accounts.length;
+    const skipMessage = skipped ? `已跳过 ${skipped} 个 free 账号。` : '';
+    if (!accounts.length) {
+      setStatus(elements.healthStatus, skipMessage || '等待自动测活。');
+      return;
+    }
+    const results = accounts.map(account => sharedHealth.get(healthCredentialKey(account)));
+    if (!results.every(Boolean)) return;
+    const ok = results.filter(item => item.status === 200).length;
+    const failed = results.filter(item => item.status == null).length;
+    const forbidden = results.filter(item => item.status === 403).length;
+    setStatus(elements.healthStatus, `测活完成：HTTP 200 ${ok}，非 200 ${results.length - ok}，403 拒绝 ${forbidden}，失败 ${failed}。${skipMessage}`, forbidden || failed ? 'error' : 'ok');
+  }
+
+  function toolHealthAccount(record) {
+    if (record.healthAccount) return record.healthAccount;
+    const account = record.account;
+    return { email: account?.credentials?.email || account?.email || account?.extra?.email,
+      accessToken: account?.credentials?.access_token || account?.credentials?.accessToken || account?.access_token || account?.accessToken,
+      accountId: account?.credentials?.chatgpt_account_id || account?.credentials?.account_id || account?.account_id };
+  }
+
+  function refreshSharedHealth() {
+    const converted = state.converted.map(convertedHealthAccount);
+    const isTool = state.format === 'sub2api-tools';
+    const records = isTool ? state.toolRecords : state.converted;
+    const skip = isTool ? skipFreeToolRecord : skipFreeConverted;
+    const results = records.map((record, index) => {
+      const account = isTool ? toolHealthAccount(record) : converted[index];
+      const result = sharedHealth.get(healthCredentialKey(account));
+      return result ? { ...result, index } : null;
+    });
+    // Keep source indices stable for health filters, logout and device details.
+    state.health = results.every((result, index) => result || skip(records[index])) ? results : [];
+    const testAccounts = converted.map((account, index) => ({ ...account, planType: convertedPlanType(state.converted[index]) }));
+    const isFree = account => String(account.planType || '').trim().toLowerCase() === 'free';
+    const healthy = testAccounts.filter(account => freshHealth.has(healthCredentialKey(account)) && sharedHealth.get(healthCredentialKey(account))?.status === 200);
+    evaluationEligibility = { total: converted.length,
+      healthyCount: healthy.length, skippedFree: testAccounts.filter(isFree).length,
+      pending: Boolean(healthController) && state.converted.some(item => !skipFreeConverted(item) && !freshHealth.has(healthCredentialKey(convertedHealthAccount(item)))),
+      accounts: healthy.filter(account => !isFree(account)) };
+  }
+
+  async function startHealthCheck({ force = true } = {}) {
     cancelHealthCheck();
+    const all = healthCandidates();
+    const activeKeys = new Set(healthCandidates(true).map(healthCredentialKey));
+    const checkedKeys = new Set(all.map(healthCredentialKey));
+    // Retain plan knowledge when invalidating health, including toggles during a recheck.
+    for (const [key, result] of sharedHealth) {
+      if (result?.usage?.planType) knownHealthPlans.set(key, result.usage.planType);
+      if (!activeKeys.has(key) || (force && checkedKeys.has(key))) { sharedHealth.delete(key); freshHealth.delete(key); }
+    }
+    for (const key of knownHealthPlans.keys()) if (!activeKeys.has(key)) knownHealthPlans.delete(key);
+    const accounts = all.filter(account => !freshHealth.has(healthCredentialKey(account)));
+    if (!accounts.length) {
+      refreshSharedHealth();
+      updateOutput();
+      renderHealthSummary();
+      return;
+    }
     const controller = new AbortController();
     healthController = controller;
     const isCurrent = workspaceTaskIsCurrent(controller.signal);
     const run = state.healthRun;
-    state.health = [];
-    evaluationEligibility = { accounts: [], total: state.converted.length, pending: state.converted.length > 0 };
     resetLogoutAllSessions();
-    renderHealth();
+    refreshSharedHealth();
     updateOutput();
-    if (!state.converted.length) {
-      setStatus(elements.healthStatus, "等待自动测活。");
-      return;
-    }
     const concurrency = selectedTaskConcurrency();
-    setStatus(elements.healthStatus, `正在测活 ${state.converted.length} 个账号，并发 ${concurrency}...`);
+    setStatus(elements.healthStatus, `正在测活 ${accounts.length} 个账号，并发 ${concurrency}...`);
     try {
-      const response = await pageFetch("/api/session-health", {
-        method: "POST",
-        signal: controller.signal,
-        credentials: "same-origin",
-        headers: loginProxyHeaders({ "Content-Type": "application/json" }),
-         body: JSON.stringify({ includeUsage: true, includeDevices: true, includeTrial: true, concurrency, accounts: state.converted.map((item) => ({ accessToken: item.cpa.access_token, accountId: item.sub2apiAccount?.credentials?.chatgpt_account_id })) }),
+      const response = await pageFetch('/api/session-health', {
+        method: 'POST', signal: controller.signal, credentials: 'same-origin',
+        headers: loginProxyHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ includeUsage: true, includeDevices: true, includeTrial: true, concurrency, accounts }),
       });
       const payload = await readJsonResponse(response);
       if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
       if (!isCurrent() || run !== state.healthRun) return;
-      state.health = Array.isArray(payload.results) ? payload.results : [];
-      if (!healthComplete()) throw new Error("测活接口返回结果不完整");
-      evaluationEligibility = { total: state.converted.length, pending: false,
-        accounts: state.converted.filter((_, index) => state.health[index]?.status === 200).map(item => ({
-          email: item.cpa.email, accessToken: item.cpa.access_token, accountId: item.cpa.account_id,
-        })) };
-      const ok = state.health.filter((item) => item.status === 200).length;
-      const failed = state.health.filter((item) => item.status == null).length;
-      const forbidden = state.health.filter((item) => item.status === 403).length;
-      setStatus(elements.healthStatus, `测活完成：HTTP 200 ${ok}，非 200 ${state.health.length - ok}，403 拒绝 ${forbidden}，失败 ${failed}。`, forbidden || failed ? "error" : "ok");
-      renderHealth();
-      updateOutput();
+      if (!Array.isArray(payload.results) || payload.results.length !== accounts.length) throw new Error('测活接口返回结果不完整');
+      accounts.forEach((account, index) => {
+        const key = healthCredentialKey(account);
+        sharedHealth.set(key, payload.results[index]);
+        freshHealth.add(key);
+      });
+      renderHealthSummary();
     } catch (error) {
       if (!isCurrent() || run !== state.healthRun) return;
-      state.health = [];
-      evaluationEligibility = { accounts: [], total: state.converted.length, pending: false };
-      renderHealth();
-      updateOutput();
-      setStatus(elements.healthStatus, `自动测活失败：${error instanceof Error ? error.message : String(error)}`, "error");
-    } finally { if (healthController === controller) healthController = null; }
+      setStatus(elements.healthStatus, `自动测活失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      if (healthController === controller) {
+        healthController = null;
+        refreshSharedHealth();
+        updateOutput();
+      }
+    }
   }
 
   function cancelHealthCheck() {
@@ -1705,135 +1811,72 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     healthController = null;
   }
 
-  async function startToolHealthCheck() {
-    cancelHealthCheck();
-    const controller = new AbortController();
-    healthController = controller;
-    const isCurrent = workspaceTaskIsCurrent(controller.signal);
-    const run = state.healthRun;
-    state.health = [];
-    resetLogoutAllSessions();
-    renderHealth();
-    updateOutput();
-    if (!state.toolRecords.length) {
-      setStatus(elements.healthStatus, "等待自动测活。");
-      return;
+  function rebuildSharedAccounts(text, sourceMetadata = []) {
+    const stamp = Date.parse(state.conversionAt);
+    const now = new Date(Number.isFinite(stamp) ? stamp : Date.now());
+    let imported = [], parsed = null;
+    const skipped = [];
+    if (text.trim()) {
+      try { imported = parseInputDocuments(text).map((item, index) => ({ ...item, ...sourceMetadata[index] })); }
+      catch (error) { skipped.push({ sourceName: '输入', reason: error.message }); }
+      try { parsed = parseSub2apiRecords(text); } catch { /* Other supported account formats are converted below. */ }
     }
-    const concurrency = selectedTaskConcurrency();
-    setStatus(elements.healthStatus, `正在测活 ${state.toolRecords.length} 个账号，并发 ${concurrency}...`);
-    try {
-      const response = await pageFetch("/api/session-health", {
-        method: "POST",
-        signal: controller.signal,
-        credentials: "same-origin",
-        headers: loginProxyHeaders({ "Content-Type": "application/json" }),
-         body: JSON.stringify({ includeUsage: true, includeDevices: true, includeTrial: true, concurrency, accounts: state.toolRecords.map((record) => ({
-           accessToken: record.account?.credentials?.access_token || record.account?.credentials?.accessToken || record.account?.access_token || record.account?.accessToken,
-           accountId: record.account?.credentials?.chatgpt_account_id || record.account?.credentials?.account_id,
-         })) }),
-      });
-      const payload = await readJsonResponse(response);
-      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      if (!isCurrent() || run !== state.healthRun) return;
-      state.health = Array.isArray(payload.results) ? payload.results : [];
-      if (!toolHealthComplete()) throw new Error("测活接口返回结果不完整");
-      const ok = state.health.filter((item) => item.status === 200).length;
-      const failed = state.health.filter((item) => item.status == null).length;
-      const forbidden = state.health.filter((item) => item.status === 403).length;
-      setStatus(elements.healthStatus, `测活完成：HTTP 200 ${ok}，非 200 ${state.health.length - ok}，403 拒绝 ${forbidden}，失败 ${failed}。`, forbidden || failed ? "error" : "ok");
-      renderHealth();
-      updateOutput();
-    } catch (error) {
-      if (!isCurrent() || run !== state.healthRun) return;
-      state.health = [];
-      renderHealth();
-      updateOutput();
-      setStatus(elements.healthStatus, `自动测活失败：${error instanceof Error ? error.message : String(error)}`, "error");
-    } finally { if (healthController === controller) healthController = null; }
+    const convert = source => {
+      try { return { source, item: convertSession(source.value, { now, sourceName: source.sourceName, sourcePath: source.path }) }; }
+      catch (error) { skipped.push({ sourceName: source.sourceName, path: source.path, reason: error.message }); return null; }
+    };
+    rememberLoginAccountKeys();
+    const linked = new Set(state.linkedAccountKeys);
+    const manual = imported.map(convert).filter(Boolean).filter(row => !linked.has(sharedAccountKey(row.item.cpa)));
+    const login = projectLoginAccounts(state.browserAccounts).map(convert).filter(Boolean);
+    const merged = mergeSharedAccounts(manual, login, row => sharedAccountKey(row.item.cpa));
+    state.sessions = merged.map(row => row.source);
+    state.converted = merged.map(row => row.item);
+    state.skipped = skipped;
+    const record = item => ({ account: item.sub2apiAccount, type: 'sub2api-data', version: 1, proxies: [] });
+    const keyOfRecord = row => {
+      try { return sharedAccountKey(convertSession(row.account, { now }).cpa); }
+      catch { return sharedAccountKey(row.account); }
+    };
+    const manualRecords = parsed ? parsed.records.filter(row => !linked.has(keyOfRecord(row))) : manual.map(row => record(row.item));
+    state.toolRecords = mergeSharedAccounts(manualRecords, login.map(row => record(row.item)), keyOfRecord);
+    for (const row of state.toolRecords) {
+      try {
+        const item = convertSession(row.account, { now });
+        row.healthAccount = convertedHealthAccount(item);
+        row.planType = item.cpa.plan_type;
+      }
+      catch { /* Non-token records remain available to the batch tools. */ }
+    }
+    state.toolParsed = { firstDocument: parsed?.firstDocument || { type: 'sub2api-data', version: 1 },
+      proxies: parsed?.proxies || [], records: state.toolRecords };
+    state.toolResult = null;
+    refreshSharedHealth();
   }
 
   function convertFromText(text) {
-    if (state.format === "sub2api-tools") {
-      state.healthRun += 1;
-      state.health = [];
-      resetLogoutAllSessions();
-      state.converted = [];
-      state.skipped = [];
-      state.sessions = [];
-      state.toolParsed = null;
-      state.toolRecords = [];
-      state.toolParsed = parseSub2apiRecords(text);
-      state.toolRecords = state.toolParsed.records;
-      state.toolResult = buildSub2apiToolResult(text, selectedToolRecords());
-      updateOutput();
-      startToolHealthCheck();
-      return;
-    }
-
-    state.toolResult = null;
-    state.toolParsed = null;
-    state.toolRecords = [];
-    const sources = parseInputDocuments(text);
-    const converted = [];
-    const skipped = [];
-    const now = new Date();
-    state.conversionAt = now.toISOString();
-
-    sources.forEach((item, index) => {
-      try {
-        converted.push(convertSession(item.value, {
-          now,
-          sourceName: item.sourceName,
-          sourcePath: item.path || `$[${index}]`,
-        }));
-      } catch (error) {
-        skipped.push({
-          sourceName: item.sourceName,
-          path: item.path,
-          reason: error instanceof Error ? error.message : "无法转换",
-        });
-      }
-    });
-
-    if (!sources.length) {
-      skipped.push({
-        sourceName: "pasted-json",
-        path: "$",
-        reason: "未找到包含 accessToken 和 user/email 的 session 对象",
-      });
-    }
-
-    state.converted = converted;
-    state.skipped = skipped;
-    state.sessions = sources;
+    state.conversionAt = new Date().toISOString();
+    rebuildSharedAccounts(text);
     updateOutput();
-    startHealthCheck();
+    startHealthCheck({ force: false });
+  }
+
+  function rememberLoginAccountKeys() {
+    const keys = new Set(state.linkedAccountKeys);
+    for (const source of projectLoginAccounts(state.browserAccounts)) {
+      try { keys.add(sharedAccountKey(convertSession(source.value).cpa)); } catch { /* No usable credential. */ }
+    }
+    state.linkedAccountKeys = [...keys];
   }
 
   function restoreDerivedWorkspace(sourceMetadata = []) {
-    const text = elements.input.value;
-    state.sessions = [];
-    state.converted = [];
-    state.toolParsed = null;
-    state.toolRecords = [];
-    state.toolResult = null;
-    if (!text.trim()) return;
-    try {
-      if (state.format === 'sub2api-tools') {
-        state.toolParsed = parseSub2apiRecords(text);
-        state.toolRecords = state.toolParsed.records;
-        state.toolResult = buildSub2apiToolResult(text, selectedToolRecords());
-        return;
-      }
-      const sources = parseInputDocuments(text);
-      const stamp = Date.parse(state.conversionAt);
-      const now = Number.isFinite(stamp) ? new Date(stamp) : new Date();
-      state.sessions = sources.map((item, index) => ({ ...item, ...sourceMetadata[index] }));
-      for (const item of state.sessions) {
-        try { state.converted.push(convertSession(item.value, { now, sourceName: item.sourceName, sourcePath: item.path })); }
-        catch { /* Persisted parse issues remain available in the issues panel. */ }
-      }
-    } catch { /* Keep unfinished/invalid source text available for editing. */ }
+    const savedHealth = state.health;
+    rebuildSharedAccounts(elements.input.value, sourceMetadata);
+    const visible = state.format === 'sub2api-tools' ? state.toolRecords.map(toolHealthAccount) : state.converted.map(convertedHealthAccount);
+    if (savedHealth.length === visible.length) visible.forEach((account, index) => {
+      if (savedHealth[index]) sharedHealth.set(healthCredentialKey(account), savedHealth[index]);
+    });
+    refreshSharedHealth();
   }
 
   function setStatus(element, text, tone = "") {
@@ -1844,32 +1887,51 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function updateOutput() {
+    refreshSharedHealth();
     modelEvaluation.refresh();
     updatePushControls();
     persistBrowserWorkspace();
     const isTool = state.format === "sub2api-tools";
     const isLogin = state.format === "protocol-login";
-    const hasConverted = state.converted.length > 0;
+    const visibleConverted = state.converted.filter(item => !skipFreeConverted(item));
+    const skippedFree = state.converted.length - visibleConverted.length;
+    const selected = selectedConverted();
+    const hasConverted = visibleConverted.length > 0;
     let outputText = "";
 
     if (isTool && state.toolParsed) {
-      state.toolResult = buildSub2apiToolResult(elements.input.value, selectedToolRecords());
+      try {
+        state.toolResult = buildSub2apiToolResult(elements.input.value, selectedToolRecords(), state.toolParsed);
+      } catch (error) {
+        state.toolResult = null;
+        setStatus(elements.inputStatus, error.message, 'error');
+      }
     }
     if (isTool && state.toolResult) {
       outputText = elements.sub2apiOperation.value === "split"
         ? (elements.splitScope.value === "unmatched" ? state.toolResult.unmatchedText : state.toolResult.matchedText)
         : state.toolResult.outputText;
     } else if (!isLogin && hasConverted) {
-      outputText = JSON.stringify(buildOutputDocument(selectedConverted()), null, 2);
+      outputText = JSON.stringify(buildOutputDocument(selected), null, 2);
     }
 
     state.outputText = outputText;
     elements.output.value = outputText;
     elements.copyOutput.disabled = !outputText;
     elements.downloadOutput.disabled = isLogin || !outputText || (!isTool && elements.downloadScope.value === "200" && !healthComplete());
-    elements.statCount.textContent = String(isTool ? (state.toolResult?.accountCount || 0) : (isLogin ? state.loginLastAccounts.length : state.converted.length));
-    elements.statErrors.textContent = String(state.skipped.length);
+    elements.statCount.textContent = String(isTool ? (state.toolResult?.accountCount || 0) : (isLogin ? state.loginLastAccounts.length : visibleConverted.length));
+    elements.statErrors.textContent = String(state.skipped.length + skippedFree);
     elements.statFormat.textContent = OUTPUT_LABELS[state.format];
+    const syncedCount = projectLoginAccounts(state.browserAccounts).length;
+    const visibleSyncedCount = state.sessions.filter((source, index) => source.path?.startsWith('login:') && !skipFreeConverted(state.converted[index])).length;
+    const healthyCount = visibleConverted.filter(item => {
+      const key = healthCredentialKey(convertedHealthAccount(item));
+      return freshHealth.has(key) && sharedHealth.get(key)?.status === 200;
+    }).length;
+    document.querySelector('#shared-account-status').textContent = `共享账号 ${visibleConverted.length} 个 · 协议登录提供 ${visibleSyncedCount} 个 · 测活通过 ${healthyCount} 个${skippedFree ? ` · 已跳过 ${skippedFree} 个 free 账号` : ''}`;
+    document.querySelector('#login-shared-status').textContent = syncedCount
+      ? `已同步 ${syncedCount} 个个人 / 工作区凭据，可直接切换到格式转换、批处理和模型测试。`
+      : '登录成功后自动同步到其他功能，无需下载再导入。';
     elements.outputSubtitle.textContent = isTool ? "当前输出为 sub2api 批处理结果。" : (isLogin ? "协议登录完成后可导出 sub2api JSON。" : `当前输出为 ${OUTPUT_LABELS[state.format]} 导入 JSON。`);
     elements.downloadOutput.textContent = isTool && elements.sub2apiOperation.value === "split"
       ? "下载当前组"
@@ -1892,7 +1954,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     if (isSplit && state.toolResult) {
       setStatus(elements.outputStatus, `拆分完成：匹配 ${state.toolResult.matchedCount}，未匹配 ${state.toolResult.unmatchedCount}。`, "ok");
     } else if (outputText) {
-      setStatus(elements.outputStatus, `已生成 ${isTool ? state.toolResult.accountCount : state.converted.length} 个账号。`, "ok");
+      setStatus(elements.outputStatus, `已生成 ${isTool ? state.toolResult.accountCount : selected.length} 个账号。`, "ok");
     } else {
       setStatus(elements.outputStatus, "暂无输出。", state.skipped.length ? "error" : "");
     }
@@ -2015,6 +2077,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   function removeSavedAccountFromLocalState(account) {
     const id = String(account.id || '');
     const email = String(account.email || '').trim().toLowerCase();
+    rememberLoginAccountKeys();
     state.browserAccounts = state.browserAccounts.filter(item => String(item?.id || '') !== id);
     for (const key of ['loginLastIds', 'loginSessionIds', 'loginPersonalIds', 'loginBusinessIds']) {
       state[key] = (state[key] || []).filter(value => String(value) !== id);
@@ -2059,7 +2122,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     removeSavedAccountFromPushHistory(account);
     elements.loginAccountCount.textContent = `${countLoginAccountLines()} 个账号`;
     renderLoginProgress();
-    renderSavedAccounts();
+    cancelHealthCheck();
+    modelEvaluation.reset();
+    rebuildSharedAccounts(elements.input.value);
+    updateOutput();
+    renderTotpResetRecovery();
     updateLoginExportActions();
     updatePushControls();
   }
@@ -2160,12 +2227,13 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function renderAccounts() {
-    if (!state.converted.length) {
+    const accounts = state.converted.filter(item => !skipFreeConverted(item));
+    if (!accounts.length) {
       elements.accountBody.innerHTML = '<tr><td colspan="4" class="empty">暂无可转换账号。</td></tr>';
       return;
     }
 
-    elements.accountBody.innerHTML = state.converted.map((item) => `
+    elements.accountBody.innerHTML = accounts.map((item) => `
       <tr>
         <td><div class="cell-clip" title="${escapeHtml(item.name)}">${escapeHtml(item.name || "-")}</div></td>
         <td><div class="cell-clip" title="${escapeHtml(item.email)}">${escapeHtml(item.email || "-")}</div></td>
@@ -2190,10 +2258,13 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
 
   function scheduleConvert() {
     evaluationEligibility = { accounts: [], total: 0, pending: false };
-    modelEvaluation.reset();
+    if (!evaluationLogoutBusy) modelEvaluation.reset();
     cancelHealthCheck();
     const text = elements.input.value;
-    if (!text.trim()) {
+    if (!text.trim() && !projectLoginAccounts(state.browserAccounts).length) {
+      sharedHealth.clear();
+      freshHealth.clear();
+      knownHealthPlans.clear();
       state.healthRun += 1;
       state.health = [];
       resetLogoutAllSessions();
@@ -2293,6 +2364,29 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     });
   }
 
+  function useSharedLoginAccounts(showStatus) {
+    if (monitorBusy || selfLeaveBusy || protocolLogoutBusy || elements.startProtocolLogin.disabled || elements.resetLoginTotp.disabled) return;
+    const candidates = [...state.browserAccounts];
+    const visit = value => {
+      if (!value || typeof value !== 'object') return;
+      if (!Array.isArray(value)) candidates.push(value);
+      Object.values(value).forEach(child => { if (child && typeof child === 'object') visit(child); });
+    };
+    try { parseJsonValues(elements.input.value).forEach(visit); } catch { /* Keep incomplete input available for editing. */ }
+    const existing = new Set(elements.loginAccounts.value.split(/\r?\n/).filter(Boolean).map(line => loginAccountEmail(line).toLowerCase()));
+    const lines = loginCredentialLines(candidates).filter(line => !existing.has(loginAccountEmail(line).toLowerCase()));
+    if (lines.length) {
+      elements.loginAccounts.value = [elements.loginAccounts.value.trim(), ...lines].filter(Boolean).join('\n');
+      clearLoginRetry();
+      state.accountActionRetries = {};
+      updateLoginCopyActions();
+      elements.loginAccountCount.textContent = `${countLoginAccountLines()} 个账号`;
+      persistBrowserWorkspace();
+    }
+    if (showStatus) setStatus(elements.loginStatus, lines.length ? `已加入 ${lines.length} 个共享账号，可选择登录或账号操作。`
+      : '没有新增的完整登录凭据。仅含 Token 的账号可转换、测活和测试模型；协议登录需要邮箱、密码和 2FA。');
+  }
+
   async function importLoginFiles(files) {
     if (!files?.length || elements.importLoginFile.disabled || elements.startProtocolLogin.disabled || elements.resetLoginTotp.disabled) return;
     const isCurrent = workspaceTaskIsCurrent();
@@ -2321,7 +2415,12 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     }
   }
 
-  const LOGIN_STAGES = ["打开官网", "输入账号", "输入密码", "输入 2FA", "登录成功", "授权工作区", "转为 RT"];
+  const LOGIN_STAGES = ["连接 Codex", "输入账号", "验证密码", "验证 2FA", "获取首个 RT", "授权工作区", "完成"];
+  const SESSION_LOGIN_STAGES = ["连接 ChatGPT", "输入账号", "验证密码", "验证 2FA", "获取 Session"];
+  const ACCOUNT_ACTION_STAGES = ["准备账号操作", "输入账号", "验证密码", "验证 2FA", "登录成功", "处理工作区", "完成"];
+  function loginStagesForMode(mode) {
+    return mode === 'session' ? SESSION_LOGIN_STAGES : mode === 'action' ? ACCOUNT_ACTION_STAGES : LOGIN_STAGES;
+  }
   // DOM references stay outside the persisted browser state.
   const loginProgressNodes = new Map();
   const dirtyLoginRecords = new Set();
@@ -2385,10 +2484,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     return Number.isNaN(date.getTime()) ? new Date().toLocaleTimeString("zh-CN", { hour12: false }) : date.toLocaleTimeString("zh-CN", { hour12: false });
   }
 
-  function inferLoginStage(message, fallback = 0) {
+  function inferLoginStage(message, fallback = 0, phase = '') {
     const text = String(message || "");
-    if (/交换.*(?:code|token)|转为?\s*RT|RT\s*(?:完成|成功|已获取|已就绪)/i.test(text)) return 6;
-    if (/Business|workspace|工作区/i.test(text)) return 5;
+    if (/交换.*(?:code|token)|转为?\s*RT|RT\s*(?:完成|成功|已获取|已就绪)/i.test(text)) return phase === 'codex' ? 4 : 6;
+    if (/Business|workspace|工作区/i.test(text)) return phase === 'codex' ? 4 : 5;
     if (/登录完成|登录成功|Session\s*(?:已获取|已入库|有效)|accessToken/i.test(text)) return 4;
     if (/提交\s*(?:TOTP|2FA)|2FA\/MFA|MFA\s*(?:验证|挑战)|输入\s*2FA/i.test(text)) return 3;
     if (/提交账号密码|PasswordVerify|输入密码/i.test(text)) return 2;
@@ -2402,6 +2501,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     // Warnings and failures keep their diagnostic details, even when the
     // corresponding successful request is normally hidden.
     if (/^(?:warn|warning|error)$/i.test(level) || /失败|异常|错误|未找到|无法|重试|重新.*验证/i.test(text)) return text;
+    if (/密码\+2FA 账号，直接 Codex 登录/.test(text)) return '直接进行 Codex OAuth 登录，验证账号、密码和 2FA';
     if (/(?:预生成|复用已有)注册资料|零元.*试用|协议隔离环境|独立Cookie\/设备|账号已有本地 TOTP 密钥|清理旧 Session|协议重登第\s*\d+\//i.test(text)) return '';
     if (/准备检测代理连通性|OAuth 落点|Cookie 诊断|工作区授权页|密码\+2FA 账号|账号已注册，跳过注册|Codex OAuth[：:]|授权.*(?:跳转|落点)/i.test(text)) return '';
     if (/等待.*队列调度/.test(text)) return '已加入队列，等待执行';
@@ -2442,7 +2542,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     });
   }
 
-  function initializeLoginProgress(lines, { preserveExports = false } = {}) {
+  function initializeLoginProgress(lines, { preserveExports = false, workspaceMode = 'action' } = {}) {
     state.loginProgress = new Map();
     state.loginSensitiveValues = [];
     state.loginLastAccounts = [];
@@ -2460,6 +2560,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       state.loginProgress.set(email.toLowerCase(), {
         id: "",
         email,
+        workspaceMode,
         stage: 0,
         status: "waiting",
         logs: [],
@@ -2474,6 +2575,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function updateLoginExportActions() {
+    document.querySelector('#login-mode-description').textContent = (getLoginWorkspaceMode() === 'session'
+      ? '登录 ChatGPT Web 并获取 Session，完成后结束。'
+      : '直接使用 Codex OAuth 验证账号、密码和 2FA，复用本次登录获取全部可用工作区 RT。')
+      + (elements.loginRequireNonPersonal.checked ? ' 仅选择非个人工作区，未获取到时自动重新登录，最多尝试三次。' : ' 没有个人工作区时直接使用其他工作区。');
     for (const [key, button, label] of [
       ['selfLeave', elements.selfLeaveWorkspaces, '自踢'],
       ['logoutAll', elements.protocolLogoutAll, '退出全部会话'],
@@ -2504,7 +2609,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   function pendingLoginRetry(lines, workspaceMode) {
     const retry = state.loginRetry;
     if (!retry || !Array.isArray(retry.ids) || !retry.ids.length) return null;
-    if (retry.workspaceMode !== workspaceMode) {
+    if (retry.workspaceMode !== workspaceMode || Boolean(retry.requireNonPersonal) !== elements.loginRequireNonPersonal.checked) {
       clearLoginRetry();
       return null;
     }
@@ -2531,7 +2636,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       .map(item => ({ id: String(item.id), email: String(item.email || '').trim() }))
       .filter((item, index, rows) => rows.findIndex(other => other.id === item.id) === index);
     state.loginRetry = failed.length
-      ? { ids: failed.map(item => item.id), accounts: failed, workspaceMode, inputEmails: loginInputIdentity(lines) }
+      ? { ids: failed.map(item => item.id), accounts: failed, workspaceMode, requireNonPersonal: elements.loginRequireNonPersonal.checked, inputEmails: loginInputIdentity(lines) }
       : null;
     updateLoginExportActions();
   }
@@ -2565,8 +2670,13 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function updateLoginStageRail(records) {
+    const stages = loginStagesForMode(records[0]?.workspaceMode || getLoginWorkspaceMode());
+    elements.loginStepList.dataset.stepCount = String(stages.length);
     Array.from(elements.loginStepList.querySelectorAll("[data-login-stage]")).forEach((item) => {
       const index = Number(item.dataset.loginStage);
+      item.hidden = index >= stages.length;
+      item.classList.toggle('is-last-step', index === stages.length - 1);
+      item.querySelector('.login-step-label').textContent = stages[index] || '';
       const active = records.some((record) => record.status === "running" && record.stage === index);
       const done = records.length > 0 && records.every((record) => record.status === "success" || record.stage > index);
       const failed = records.some((record) => record.status === "error" && record.stage === index);
@@ -2584,8 +2694,9 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     const counts = { waiting: 0, running: 0, success: 0, error: 0 };
     records.forEach((record) => { counts[record.status] = (counts[record.status] || 0) + 1; });
     const completed = counts.success + counts.error;
-    const progressUnits = records.reduce((total, record) => total + (record.status === "success" || record.status === "error" ? LOGIN_STAGES.length : (record.status === "waiting" ? 0 : record.stage + 1)), 0);
-    const overallPercent = records.length ? Math.round((progressUnits / (records.length * LOGIN_STAGES.length)) * 100) : 0;
+    const progressUnits = records.reduce((total, record) => total + (record.status === "success" || record.status === "error" ? 1
+      : record.status === "waiting" ? 0 : Math.min(1, (record.stage + 1) / loginStagesForMode(record.workspaceMode).length)), 0);
+    const overallPercent = records.length ? Math.round((progressUnits / records.length) * 100) : 0;
     elements.loginAccountCount.textContent = `${records.length || countLoginAccountLines()} 个账号`;
     elements.loginProgressSummary.textContent = `等待 ${counts.waiting} · 进行中 ${counts.running} · 成功 ${counts.success} · 失败 ${counts.error}`;
     elements.loginCompletedCount.textContent = `已完成 ${completed}/${records.length}`;
@@ -2625,9 +2736,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         elements.loginProgressList.append(article);
       }
       if (full) elements.loginProgressList.append(node.article);
-      const stage = LOGIN_STAGES[Math.min(record.stage, LOGIN_STAGES.length - 1)];
+      const stages = loginStagesForMode(record.workspaceMode);
+      const stage = stages[Math.min(record.stage, stages.length - 1)];
       const label = record.status === "waiting" ? "等待开始" : (record.status === "success" ? "已完成" : (record.status === "error" ? (validationFailureLabel(record) || `${stage}失败`) : stage));
-      const progress = record.status === "success" ? 100 : Math.max(5, Math.round(((record.stage + 1) / LOGIN_STAGES.length) * 100));
+      const progress = record.status === "success" ? 100 : Math.max(5, Math.min(100, Math.round(((record.stage + 1) / stages.length) * 100)));
       const log = record.logs.length
         ? record.logs.map((item) => `[${item.time}] ${item.level === "error" ? "失败 · " : (/^warn/.test(item.level) ? "注意 · " : "")}${item.message}`).join("\n")
         : "等待执行...";
@@ -2795,6 +2907,16 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     return elements.pushTarget.querySelector('input:checked')?.value || 'none';
   }
 
+  function pushFeedbackTarget() {
+    return state.format === 'model-evaluation' ? 'sub2api' : selectedPushTarget();
+  }
+
+  function convertedPushSelection() {
+    return { accounts: selectedConverted(), skippedFree: state.converted.filter(skipFreeConverted).length };
+  }
+
+  let converterFilterSaving = false;
+
   function normalizePushAddress(value, target) {
     const raw = String(value || '').trim();
     if (!raw) throw new Error('请填写服务地址');
@@ -2817,15 +2939,23 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function updatePushControls() {
-    const target = selectedPushTarget();
+    const target = pushFeedbackTarget();
     const login = state.format === 'protocol-login';
     const slot = login ? elements.loginPushSlot : elements.converterPushSlot;
-    const feedbackSlot = login ? elements.loginPushFeedbackSlot : elements.converterPushFeedbackSlot;
+    const feedbackSlot = state.format === 'model-evaluation' ? elements.evaluationPushFeedbackSlot
+      : login ? elements.loginPushFeedbackSlot : elements.converterPushFeedbackSlot;
     if (elements.pushControls.parentElement !== slot) slot.append(elements.pushControls);
     if (elements.pushFeedback.parentElement !== feedbackSlot) feedbackSlot.append(elements.pushFeedback);
     elements.pushControls.classList.toggle('hidden', state.format === 'sub2api-tools');
     elements.pushConverted.classList.toggle('hidden', login || target === 'none' || state.format === 'sub2api-tools');
-    elements.pushConverted.disabled = pushBusy || monitorBusy || target === 'none' || !selectedConverted().length;
+    const selection = convertedPushSelection();
+    elements.converterFreeFilter.classList.toggle('hidden', login || state.format === 'sub2api-tools');
+    elements.loginNonPersonalFilter.classList.toggle('hidden', !login);
+    elements.loginRequireNonPersonal.disabled = monitorBusy || protocolLogoutBusy || elements.startProtocolLogin.disabled;
+    elements.converterSkipFree.disabled = pushBusy || monitorBusy || converterFilterSaving;
+    elements.converterFreeCount.textContent = converterFilterSaving ? '保存中…' : selection.skippedFree ? `（${selection.skippedFree}）` : '';
+    elements.pushConverted.disabled = pushBusy || monitorBusy || converterFilterSaving || target === 'none' || !selection.accounts.length;
+    elements.pushConverted.title = selection.skippedFree ? `已跳过 ${selection.skippedFree} 个 free 账号，可推送 ${selection.accounts.length} 个账号` : '';
     elements.retryPush.classList.toggle('hidden', !state.pushRetry?.accounts?.length);
     elements.retryPush.disabled = pushBusy || monitorBusy || !state.pushRetry?.accounts?.length || state.pushRetry.target !== target;
     const operation = activePushOperation();
@@ -2836,7 +2966,8 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     for (const radio of elements.pushTarget.querySelectorAll('input')) radio.disabled = pushBusy || monitorBusy;
     elements.pushHint.textContent = login
       ? '选择目标并保存配置后，获取全部工作区 RT 时自动推送非 free 账号；手动下载包含所有类型。配置加密保存在当前浏览器。'
-      : '配置加密保存在当前浏览器。推送范围沿用下载范围，格式由推送目标决定。';
+      : `配置加密保存在当前浏览器。推送范围沿用下载范围，格式由推送目标决定。${elements.converterSkipFree.checked ? `测活、展示、转换和推送均跳过 free，当前跳过 ${selection.skippedFree} 个账号。` : '已允许测活、展示、转换和推送 free 账号。'}`;
+    modelEvaluation.refresh();
   }
 
   function renderPushResults() {
@@ -2959,7 +3090,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     if (!operation) return;
     const isCurrent = workspaceTaskIsCurrent();
     try {
-      const target = selectedPushTarget();
+      const target = pushFeedbackTarget();
       const settings = pushSettings(target);
       requirePushOperationSettings(operation, settings, target);
       const items = operation.items.filter(item => item.account && !item.disabled && (item.status === 'unknown' || (item.status === 'failed' && !item.retryable)));
@@ -2985,12 +3116,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     }
   }
 
-  async function runPush(buildAccounts, { retry = false, emptyMessage = '', upsert = false, recoverState = false, signal } = {}) {
+  async function runPush(buildAccounts, { retry = false, emptyMessage = '', upsert = false, recoverState = false, signal, target = selectedPushTarget() } = {}) {
     if (pushBusy || (monitorBusy && !signal)) return;
     hidePushToast();
     const isCurrent = workspaceTaskIsCurrent(signal);
     const ownsWorkspace = workspaceTaskIsCurrent();
-    const target = selectedPushTarget();
     let accounts;
     let operation;
     let items = [];
@@ -3147,7 +3277,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     if (!navigator.locks) return { reason: '此浏览器不支持多标签页任务协调，请使用新版浏览器及 HTTPS' };
     const target = selectedPushTarget();
     try { pushSettings(target); } catch { return { reason: '请选择并保存 Sub2API 或 CPA 推送配置' }; }
-    const accounts = state.browserAccounts.filter(account => account.id && !state.monitorStopped[account.id] && account.email?.includes('@')
+    const accounts = state.browserAccounts.filter(account => account.id && !account.totp_reset_pending && !state.monitorStopped[account.id] && account.email?.includes('@')
       && (account.openai_password || account.password) && (account.two_factor_secret || account.twoFactorSecret)
       && (account.session_access_token || account.openai_access_token || state.monitorRetries[account.id]));
     return accounts.length ? { accounts } : { reason: state.browserAccounts.some(account => state.monitorStopped[account.id])
@@ -3303,7 +3433,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
                 : data.monitorBusy ? '账号由其他浏览器负责，本轮跳过' : '定时重登失败，稍后重试', { stage: data.ok ? 6 : 0, status: data.ok ? 'success' : 'error' });
             };
             const reloginIds = invalid.map(account => String(account.id));
-            const pipeline = await loginIcloudStream('/api/v2/accounts/protocol-login-pipeline', { ids: reloginIds, workspaceMode: 'all', ...network }, onEvent, controller.signal);
+            const pipeline = await loginIcloudStream('/api/v2/accounts/protocol-login-pipeline', { ids: reloginIds, workspaceMode: 'all', requireNonPersonal: elements.loginRequireNonPersonal.checked, ...network }, onEvent, controller.signal);
             requireCurrentWorkspace(isCurrent);
             const pipelineResults = Array.isArray(pipeline.results) ? pipeline.results : [];
             state.loginLastResponse = pipeline;
@@ -3685,82 +3815,133 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       line: [account.email, account.openai_password || account.password, account.two_factor_secret].join('----') };
   }
 
-  async function resetLoginTotp() {
+  function renderTotpResetRecovery() {
+    const confirmed = state.browserAccounts.filter(account => !account.totp_reset_pending && account.status === '已换绑2FA');
+    if (confirmed.length) showLoginResetCredentials(confirmed.map(account => syncResetTotpInput(account.id)).filter(Boolean));
+    const pending = state.browserAccounts.filter(account => account.totp_reset_pending);
+    const panel = document.querySelector('#login-reset-pending');
+    if (!panel) return;
+    panel.classList.toggle('hidden', !pending.length);
+    const labels = {
+      preparing: '准备请求结果未收到，请在账号安全设置中核对；不要使用旧密钥重登',
+      prepared: '新密钥已生成，等待激活',
+      activating: '激活已提交，结果待确认',
+      activated: '新密钥已激活，状态待确认',
+    };
+    document.querySelector('#login-reset-pending-status').replaceChildren(...pending.map(account => {
+      const item = document.createElement('li');
+      item.textContent = `${account.email} · ${labels[account.totp_reset_pending.phase] || '状态待确认'}`;
+      return item;
+    }));
+    const credentials = pending.filter(account => account.totp_reset_pending.secret).map(account => {
+      const password = account.openai_password || account.password || '';
+      const secret = account.totp_reset_pending.secret;
+      state.loginSensitiveValues.push(password, secret);
+      if (account.totp_reset_pending.phase === 'activated') syncResetTotpInput(account.id);
+      return [account.email, password, secret].join('----');
+    });
+    document.querySelector('#login-reset-pending-credentials').textContent = credentials.join('\n');
+    document.querySelector('#copy-login-reset-pending').disabled = !credentials.length;
+    document.querySelector('#download-login-reset-pending').disabled = !credentials.length;
+    state.loginSensitiveValues = [...new Set(state.loginSensitiveValues.filter(Boolean))];
+  }
+
+  async function resetLoginTotp({ resume = false } = {}) {
     if (monitorBusy || selfLeaveBusy || protocolLogoutBusy || elements.startProtocolLogin.disabled) return;
     const isCurrent = workspaceTaskIsCurrent();
-    const completedCredentials = new Map();
-    if (typeof window.confirm === "function" && !window.confirm("重设 2FA 会先禁用旧验证器，再生成新的 2FA 密钥。请确认你能立即保存新密钥。")) return;
-    elements.resetLoginTotp.disabled = true;
-    elements.protocolLogoutAll.disabled = true;
-    elements.selfLeaveWorkspaces.disabled = true;
-    elements.importLoginFile.disabled = true;
-    elements.startProtocolLogin.disabled = true;
-    elements.loginAccounts.disabled = true;
+    if (!resume && !window.confirm('重设 2FA 会先禁用旧验证器。新密钥加密保存到浏览器后才会激活；结果不明时保留新密钥并停止重试。请保留当前登录并备份新密钥。')) return;
+    const controls = [elements.resetLoginTotp, elements.protocolLogoutAll, elements.selfLeaveWorkspaces,
+      elements.importLoginFile, elements.startProtocolLogin, elements.loginAccounts, document.querySelector('#resume-login-totp')];
+    controls.forEach(node => { node.disabled = true; });
     stopSessionMonitor(true);
+    const outcomes = new Map();
+    const completedCredentials = new Map();
     try {
-      const lines = parseLoginAccounts(elements.loginAccounts.value);
+      const configResponse = await pageFetch('/api/system/config', { cache: 'no-store' });
+      const config = configResponse.ok ? await configResponse.json() : null;
+      if (config?.totpResetProtocolVersion !== 2) throw new Error('服务端尚未支持安全换绑，请先重启服务并刷新页面');
+      requireCurrentWorkspace(isCurrent);
+      const pendingAccounts = state.browserAccounts.filter(account => account.totp_reset_pending);
+      const lines = resume ? pendingAccounts.map(account => [account.email, account.openai_password || account.password,
+        account.totp_reset_pending.secret || account.two_factor_secret].join('----')) : parseLoginAccounts(elements.loginAccounts.value);
+      if (!lines.length) throw new Error('没有需要恢复的 2FA 换绑');
       initializeLoginProgress(lines, { preserveExports: true });
-      const imported = await loginIcloudRequest("/api/v2/accounts/import", {
-        text: lines.join("\n"),
-        prepareRegistrationAssets: false,
-      });
-      if (!isCurrent()) return;
-      const importedRows = Array.isArray(imported.rows) ? imported.rows : [];
-      const ids = importedRows.map(row => row.id || row.account?.id).filter(Boolean).map(String);
-      importedRows.forEach((row, index) => {
-        const record = loginProgressRecord({ id: row.id || row.account?.id, email: row.email || row.account?.email || loginAccountEmail(lines[index]) });
-        if (!record) return;
-        record.id = String(row.id || row.account?.id || "");
-        appendLoginProgress(record, "账号已导入，等待换绑队列调度", { stage: 0, status: "waiting" });
-      });
-      if (!ids.length) throw new Error("请先完成协议登录，再重设 2FA");
+      // Existing browser records are authoritative: stale input must not replace
+      // a candidate key or overwrite a key already acknowledged by the server.
+      const knownEmails = new Set(state.browserAccounts.map(account => account.email.toLowerCase()));
+      const newLines = lines.filter(line => !knownEmails.has(loginAccountEmail(line).toLowerCase()));
+      if (newLines.length) await loginIcloudRequest('/api/v2/accounts/import', { text: newLines.join('\n'), prepareRegistrationAssets: false });
+      requireCurrentWorkspace(isCurrent);
+      const emails = new Set(lines.map(line => loginAccountEmail(line).toLowerCase()));
+      const accounts = state.browserAccounts.filter(account => emails.has(account.email.toLowerCase()));
       const concurrency = selectedTaskConcurrency();
-      setStatus(elements.loginStatus, `正在并发换绑 ${ids.length} 个账号的 2FA，并发 ${concurrency}...`);
-      const result = await loginIcloudStream("/api/v2/accounts/reset-totp", { ids, concurrency, ...selectedLoginProxyNetwork() }, (name, data) => {
-        const record = loginProgressRecord(data);
-        if (name === "account_start") {
-          appendLoginProgress(record, "开始换绑 2FA", { stage: 0, status: "running", time: data.time });
-        } else if (name === "account_log") {
-          appendLoginProgress(record, data.msg || data.error, {
-            stage: /禁用旧|生成新的|激活|TOTP|2FA/i.test(data.msg || data.error) ? 3 : 2,
-            status: "running", level: data.level, time: data.time,
-          });
-        } else if (name === "account_done") {
-          if (data.ok) {
-            const credential = syncResetTotpInput(data.id);
-            if (credential) completedCredentials.set(String(data.id), credential);
-            showLoginResetCredentials([...completedCredentials.values()]);
-            persistBrowserWorkspace(true);
+      const freshIds = accounts.filter(account => !account.totp_reset_pending).map(account => String(account.id));
+      const confirmIds = accounts.filter(account => account.totp_reset_pending && account.totp_reset_pending.phase !== 'prepared').map(account => String(account.id));
+      const runStep = async (action, ids) => {
+        if (!ids.length) return;
+        requireCurrentWorkspace(isCurrent);
+        const labels = { prepare: '生成并保存新密钥', activate: '激活已保存的新密钥', confirm: '核对新 2FA 状态' };
+        setStatus(elements.loginStatus, `正在${labels[action]}：${ids.length} 个账号…`);
+        const result = await loginIcloudStream("/api/v2/accounts/reset-totp", { ids, action, concurrency, ...selectedLoginProxyNetwork() }, (name, data) => {
+          const record = loginProgressRecord(data);
+          if (name === 'account_start') appendLoginProgress(record, labels[action], { stage: 1, status: 'running' });
+          if (name === 'account_log') appendLoginProgress(record, data.msg || data.error, { stage: 2, status: 'running', level: data.level });
+          if (name === 'account_done') {
+            outcomes.set(String(data.id), data);
+            if (data.phase === 'confirmed' && data.ok) {
+              const credential = syncResetTotpInput(data.id);
+              if (credential) completedCredentials.set(String(data.id), credential);
+              showLoginResetCredentials([...completedCredentials.values()]);
+            }
+            renderTotpResetRecovery();
+            appendLoginProgress(record, data.ok ? (data.phase === 'confirmed' ? '2FA 换绑成功' : '新密钥已保存，等待激活') : data.error || '2FA 状态待确认', {
+              stage: data.phase === 'confirmed' ? 4 : 3, status: data.ok ? (data.phase === 'confirmed' ? 'success' : 'running') : 'error',
+            });
           }
-          appendLoginProgress(record, data.ok ? "2FA 换绑成功" : (data.error || "2FA 换绑失败"), {
-            stage: data.ok ? 4 : 3, status: data.ok ? "success" : "error", level: data.ok ? "info" : "error",
-          });
+        });
+        for (const item of result.results || []) outcomes.set(String(item.id), item);
+        requireCurrentWorkspace(isCurrent);
+      };
+      if (freshIds.length) {
+        for (const account of accounts.filter(account => freshIds.includes(String(account.id)))) {
+          account.totp_reset_pending = { phase: 'preparing', createdAt: new Date().toISOString() };
         }
-      });
-      if (!isCurrent()) return;
-      const credentials = (result.results || []).filter(item => item.ok).flatMap(item => {
-        const credential = syncResetTotpInput(item.id);
-        return credential ? [credential] : [];
-      });
-      showLoginResetCredentials(credentials);
+        try { await persistBrowserWorkspace(true, true); }
+        catch (error) {
+          for (const account of accounts.filter(account => freshIds.includes(String(account.id)))) account.totp_reset_pending = null;
+          throw error;
+        }
+        await runStep('prepare', freshIds);
+      }
+      await runStep('confirm', confirmIds);
+      const selectedIds = new Set(accounts.map(account => String(account.id)));
+      const prepared = state.browserAccounts.filter(account => selectedIds.has(String(account.id)) && account.totp_reset_pending?.phase === 'prepared');
+      if (prepared.length) {
+        // The candidate and the uncertain activation marker must both survive a
+        // reload even when the next HTTP request loses its entire response.
+        for (const account of prepared) account.totp_reset_pending.phase = 'activating';
+        try { await persistBrowserWorkspace(true, true); }
+        catch (error) {
+          for (const account of prepared) account.totp_reset_pending.phase = 'prepared';
+          throw error;
+        }
+        await runStep('activate', prepared.map(account => String(account.id)));
+      }
+      renderTotpResetRecovery();
       await persistBrowserWorkspace(true, true);
-      const failed = Number(result.failed || 0);
-      const firstError = (result.results || []).find(item => !item.ok)?.error || "";
-      setStatus(elements.loginStatus, failed
-        ? `2FA 换绑完成：成功 ${result.success || 0}，失败 ${failed}。${firstError ? `原因：${firstError}` : ""}`
-        : `2FA 换绑成功：已更新 ${credentials.length} 个账号，并发 ${result.concurrency || concurrency}，请保存最新凭据。`, failed ? "error" : "ok");
+      const results = [...outcomes.values()];
+      const success = results.filter(item => item.ok && item.phase === 'confirmed').length;
+      const pending = state.browserAccounts.filter(account => selectedIds.has(String(account.id)) && account.totp_reset_pending).length;
+      const failed = results.filter(item => !item.ok && !state.browserAccounts.find(account => String(account.id) === String(item.id))?.totp_reset_pending).length;
+      setStatus(elements.loginStatus, `2FA 换绑完成：成功 ${success}，失败 ${failed}，待处理 ${pending}。${pending ? '请保留新密钥，使用“继续 / 核对换绑”处理。' : '请保存最新凭据。'}`, failed || pending ? 'error' : 'ok');
     } catch (error) {
       if (!isCurrent()) return;
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus(elements.loginStatus, message, "error");
+      renderTotpResetRecovery();
+      setStatus(elements.loginStatus, `${error.message || error}。已停止后续激活；如有新密钥，请立即复制或下载备份。`, 'error');
     } finally {
       if (isCurrent()) {
-        elements.resetLoginTotp.disabled = false;
-        elements.protocolLogoutAll.disabled = false;
-        elements.selfLeaveWorkspaces.disabled = false;
-        elements.importLoginFile.disabled = false;
-        elements.startProtocolLogin.disabled = false;
-        elements.loginAccounts.disabled = false;
+        controls.forEach(node => { node.disabled = false; });
+        renderTotpResetRecovery();
         scheduleSessionMonitor();
       }
     }
@@ -3947,6 +4128,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     if (monitorBusy || selfLeaveBusy || protocolLogoutBusy || elements.resetLoginTotp.disabled) return;
     const isCurrent = workspaceTaskIsCurrent();
     elements.startProtocolLogin.disabled = true;
+    elements.loginRequireNonPersonal.disabled = true;
     elements.resetLoginTotp.disabled = true;
     elements.protocolLogoutAll.disabled = true;
     elements.selfLeaveWorkspaces.disabled = true;
@@ -3972,7 +4154,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       const previousPersonalIds = retry ? [...state.loginPersonalIds] : [];
       const previousBusinessIds = retry ? [...state.loginBusinessIds] : [];
 
-      initializeLoginProgress(lines, { preserveExports: Boolean(retry) });
+      initializeLoginProgress(lines, { preserveExports: Boolean(retry), workspaceMode });
       let imported = { rows: [], failed: 0 };
       let importedRows = [];
       let ids = retry ? retry.ids.map(String) : [];
@@ -4005,6 +4187,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         ids,
         concurrency,
         workspaceMode,
+        requireNonPersonal: elements.loginRequireNonPersonal.checked,
         ...selectedLoginProxyNetwork(),
       }, (name, data) => {
         const record = loginProgressRecord(data);
@@ -4018,7 +4201,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
           appendLoginProgress(record, message, { stage, status: "running", time: data.time });
         } else if (name === "account_log") {
           appendLoginProgress(record, data.msg || data.error, {
-            stage: data.phase === "business" ? 5 : inferLoginStage(data.msg || data.error, record?.stage || 0),
+            stage: data.phase === "business" ? 5 : inferLoginStage(data.msg || data.error, record?.stage || 0, data.phase),
             status: "running", level: data.level, time: data.time,
           });
         } else if (name === "account_done") {
@@ -4028,7 +4211,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
           if (data.ok) {
             const doneText = workspaceMode === "session"
               ? "协议登录完成，Session 已就绪"
-              : `RT 已就绪：个人 1 个，工作区 ${data.businessSuccess || 0} 个`;
+              : `RT 已就绪：个人 ${data.personalOk ? 1 : 0} 个，工作区 ${data.businessSuccess || 0} 个`;
             appendLoginProgress(record, doneText, { stage: workspaceMode === "session" ? 4 : 6, status: "success" });
           } else {
             const hint = validationFailureHint(data);
@@ -4087,6 +4270,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         elements.protocolLogoutAll.disabled = false;
         elements.selfLeaveWorkspaces.disabled = false;
         elements.importLoginFile.disabled = false;
+        updatePushControls();
         persistBrowserWorkspace(true);
       }
     }
@@ -4216,6 +4400,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     }
 
     const documents = [];
+    const sourceTexts = [];
     const skipped = [];
 
     for (const file of sourceFiles) {
@@ -4223,6 +4408,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         const text = await file.text();
         if (!isCurrent()) return;
         const parsedValues = parseJsonValues(text);
+        sourceTexts.push(text);
         const found = parsedValues.flatMap((parsed) => collectSessionLikeObjects(parsed, file.webkitRelativePath || file.name));
         if (!found.length) {
           skipped.push({
@@ -4262,15 +4448,12 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       }
     });
 
-    state.sessions = documents;
     modelEvaluation.reset();
-    state.converted = converted;
+    elements.input.value = sourceTexts.join('\n');
+    rebuildSharedAccounts(elements.input.value, documents.map(({ sourceName, path }) => ({ sourceName, path })));
     state.skipped = convertSkipped;
-    elements.input.value = documents.length === 1
-      ? JSON.stringify(documents[0].value, null, 2)
-      : JSON.stringify(documents.map((item) => item.value), null, 2);
     updateOutput();
-    startHealthCheck();
+    startHealthCheck({ force: false });
     setStatus(elements.inputStatus, `读取 ${sourceFiles.length} 个文件，生成 ${converted.length} 个账号，跳过 ${convertSkipped.length} 项。`, converted.length ? "ok" : "error");
   }
 
@@ -4331,7 +4514,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     elements.healthStatus.classList.remove("hidden");
     elements.healthTable.classList.remove("hidden");
     elements.inputTitle.textContent = isTool ? "sub2api 批处理" : (isLogin ? "协议登录输入" : "Session JSON");
-    elements.inputSubtitle.textContent = isTool ? "粘贴 sub2api JSON/TXT，或选择一个或多个文件。" : (isLogin ? "在左侧输入账号并启动协议登录，右侧查看结果。" : "粘贴 ChatGPT Web session，或拖入一个或多个 JSON 文件。");
+    elements.inputSubtitle.textContent = isTool ? "沿用共享账号，也可粘贴或导入 Sub2API、Session、CPA 文件。" : (isLogin ? "在左侧输入账号并启动协议登录，右侧查看结果。" : "粘贴或导入账号；协议登录的结果会自动合并，无需再次导入。");
     elements.loadExample.textContent = isTool ? "填入 sub2api 示例" : "填入示例结构";
     elements.input.disabled = isLogin;
     elements.pickFiles.disabled = isLogin;
@@ -4341,9 +4524,114 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   const teamCheckout = initializeTeamCheckout({ request: pageFetch, isWorkspaceCurrent: workspaceTaskIsCurrent });
+  async function logoutEvaluationAccounts(accounts) {
+    const isCurrent = workspaceTaskIsCurrent();
+    const disabled = [...document.querySelectorAll('input, textarea, select, button')].map(node => ({ node, disabled: node.disabled }));
+    evaluationLogoutBusy = true;
+    protocolLogoutBusy = true;
+    stopSessionMonitor(true);
+    cancelHealthCheck();
+    disabled.forEach(({ node }) => { node.disabled = true; });
+    const outcomes = [];
+    const wanted = new Set(accounts.map(evaluationAccountOwner));
+    const linked = state.browserAccounts.filter(account => wanted.has(evaluationAccountOwner(account)));
+    const linkedOwners = new Set(linked.map(evaluationAccountOwner));
+    const manual = accounts.filter(account => !linkedOwners.has(evaluationAccountOwner(account)));
+    const record = rows => outcomes.push(...rows);
+    try {
+      if (linked.length) {
+        const results = new Map();
+        try {
+          const result = await loginIcloudStream('/api/v2/accounts/protocol-logout-all', {
+            ids: linked.map(account => String(account.id)), confirmed: true, ...selectedLoginProxyNetwork(),
+          }, (name, data) => { if (name === 'account_done') results.set(String(data.id), data); });
+          requireCurrentWorkspace(isCurrent);
+          for (const row of result.results || []) results.set(String(row.id), row);
+        } catch (error) {
+          requireCurrentWorkspace(isCurrent);
+          for (const account of linked) if (!results.has(String(account.id))) results.set(String(account.id), { ok: false, error: error.message });
+        }
+        record(linked.map(account => ({ ...results.get(String(account.id)), email: account.email })));
+      }
+      if (manual.length) {
+        try {
+          const response = await pageFetch('/api/logout-all-sessions', { method: 'POST', credentials: 'same-origin',
+            headers: loginProxyHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ accounts: manual.map((account, index) => ({ ...account, index })), concurrency: selectedTaskConcurrency() }),
+          });
+          const result = await readJsonResponse(response);
+          if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+          requireCurrentWorkspace(isCurrent);
+          record(manual.map((account, index) => ({ ...result.results?.find(row => row.index === index), email: account.email })));
+        } catch (error) { requireCurrentWorkspace(isCurrent); record(manual.map(account => ({ email: account.email, ok: false, error: error.message }))); }
+      }
+      const succeeded = new Set(outcomes.filter(row => row.ok).map(evaluationAccountOwner));
+      if (succeeded.size) {
+        const ids = new Set(state.browserAccounts.filter(account => succeeded.has(evaluationAccountOwner(account))).map(account => String(account.id)));
+        for (const id of ids) markMonitorStopped(id, 'sessions_logged_out');
+        for (const key of ['loginSessionIds', 'loginPersonalIds', 'loginBusinessIds', 'loginLastIds']) state[key] = state[key].filter(id => !ids.has(String(id)));
+        clearLoginRetry();
+        // Remove imported copies too: logging out one workspace invalidates its siblings.
+        if (elements.input.value.trim()) {
+          const remaining = parseJsonValues(elements.input.value).map(document => {
+            const removed = new Set(collectSessionLikeObjects(document).filter(source => {
+              try { return succeeded.has(evaluationAccountOwner(convertSession(source.value).cpa)); } catch { return false; }
+            }).map(source => source.path));
+            const prune = (value, path = '$') => {
+              if (removed.has(path)) return undefined;
+              if (Array.isArray(value)) return value.map((child, index) => prune(child, `${path}[${index}]`)).filter(child => child !== undefined);
+              if (isPlainObject(value)) return Object.fromEntries(Object.entries(value)
+                .map(([key, child]) => [key, prune(child, `${path}.${key}`)]).filter(([, child]) => child !== undefined));
+              return value;
+            };
+            return prune(document);
+          }).filter(document => document !== undefined);
+          elements.input.value = remaining.map(document => JSON.stringify(document, null, 2)).join('\n');
+        }
+        state.pushRetry = null;
+        for (const operation of state.pushOperations) for (const item of operation.items) {
+          if (item.account && succeeded.has(evaluationAccountOwner({ email: item.account.email || item.account.credentials?.email || item.account.name }))) {
+            item.disabled = true; item.retryable = false; delete item.account;
+          }
+        }
+        syncPushOperationViews();
+        scheduleConvert();
+        updateLoginExportActions();
+        elements.exportLoginSessions.disabled = !state.loginSessionIds.length;
+        await persistBrowserWorkspace(true, true);
+      }
+      return outcomes;
+    } finally {
+      evaluationLogoutBusy = false; protocolLogoutBusy = false;
+      if (isCurrent()) {
+        disabled.forEach(({ node, disabled: value }) => { node.disabled = value; });
+        updateLoginExportActions();
+        elements.exportLoginSessions.disabled = !state.loginSessionIds.length;
+        updatePushControls(); scheduleSessionMonitor();
+      }
+    }
+  }
   const modelEvaluation = initializeModelEvaluation({
     request: pageFetch, isWorkspaceCurrent: workspaceTaskIsCurrent, getHeaders: loginProxyHeaders,
     getEligibility: () => evaluationEligibility,
+    getConcurrency: () => taskConcurrency,
+    isPushBusy: () => pushBusy || monitorBusy || protocolLogoutBusy || selfLeaveBusy || state.logoutInProgress || elements.startProtocolLogin.disabled || elements.resetLoginTotp.disabled,
+    getAccounts: () => state.converted.map(convertedHealthAccount),
+    getLoginAccounts: () => ({ input: elements.loginAccounts.value, accounts: state.browserAccounts }),
+    onLogoutFailed: logoutEvaluationAccounts,
+    onPushPassed: async accounts => {
+      try { pushSettings('sub2api'); }
+      catch (error) {
+        openSub2PushConfig();
+        setStatus(elements.loginSub2Status, `${error.message}，保存后再点击推送。`, 'error');
+        return;
+      }
+      const keys = new Set(accounts.map(healthCredentialKey));
+      return runPush(async () => state.converted
+        .filter(item => keys.has(healthCredentialKey(convertedHealthAccount(item))))
+        .map(item => applySub2apiOutputConfig(item.sub2apiAccount)),
+      { target: 'sub2api', emptyMessage: '没有可推送的答案正确账号，请重新测试。' });
+    },
     onImport: text => {
       const sources = parseInputDocuments(text);
       const valid = sources.filter(item => { try { convertSession(item.value); return true; } catch { return false; } });
@@ -4354,15 +4642,11 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     },
   });
   const selectFormat = (format) => {
-    const previous = state.format;
     state.format = format;
     updateToolControls();
-    if (format === 'model-evaluation' || (previous === 'model-evaluation' && ['sub2api', 'cpa', 'cockpit', 'codex'].includes(format))) {
-      updateOutput();
-      if (format === 'sub2api' && !evaluationEligibility.total && state.converted.length) startHealthCheck();
-      return;
-    }
-    scheduleConvert();
+    updateOutput();
+    if (format === 'protocol-login') useSharedLoginAccounts(false);
+    if (format === 'model-evaluation' && !healthController && !evaluationEligibility.accounts.length && state.converted.length) startHealthCheck({ force: false });
     if (state.format === "protocol-login" && !state.loginSub2Loaded) {
       const isCurrent = workspaceTaskIsCurrent();
       loadLoginSub2Config().catch((error) => {
@@ -4370,8 +4654,14 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         setStatus(elements.loginSub2Status, `加载 Sub2 配置失败：${error instanceof Error ? error.message : String(error)}`, "error");
       });
     }
+    persistBrowserWorkspace(true);
   };
   elements.formatButtons.forEach((button) => button.addEventListener("click", () => selectFormat(button.dataset.format)));
+  document.querySelectorAll('[data-account-destination]').forEach(button => button.addEventListener('click', () => selectFormat(button.dataset.accountDestination)));
+  document.querySelector('#use-shared-login-accounts').addEventListener('click', () => useSharedLoginAccounts(true));
+  for (const selector of ['#evaluation-health-check', '#shared-health-check']) {
+    document.querySelector(selector).addEventListener('click', () => startHealthCheck());
+  }
   const bindTabKeyboard = (selector, onSelect) => {
     const tabs = [...document.querySelectorAll(selector)];
     for (const tab of tabs) {
@@ -4425,6 +4715,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   elements.loginWorkspaceMode?.addEventListener("change", () => {
     if (state.loginRetry && state.loginRetry.workspaceMode !== getLoginWorkspaceMode()) clearLoginRetry();
     updateLoginExportActions();
+    updateLoginStageRail([...state.loginProgress.values()]);
   });
   elements.loginProxyMode?.addEventListener("change", () => selectedLoginProxyNetwork());
   elements.loginProxyLocalPort?.addEventListener("input", () => selectedLoginProxyNetwork());
@@ -4437,6 +4728,19 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   elements.downloadUnmatched?.addEventListener("click", () => downloadSplitGroup("unmatched"));
   elements.startProtocolLogin?.addEventListener("click", () => startProtocolLogin());
   elements.resetLoginTotp?.addEventListener("click", () => resetLoginTotp());
+  document.querySelector('#resume-login-totp').addEventListener('click', () => resetLoginTotp({ resume: true }));
+  document.querySelector('#copy-login-reset-pending').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(document.querySelector('#login-reset-pending-credentials').textContent);
+      setStatus(elements.loginStatus, '待确认的新密钥凭据已复制，请保留并核对状态。', 'ok');
+    } catch { setStatus(elements.loginStatus, '复制失败，请下载备份或手动复制。', 'error'); }
+  });
+  document.querySelector('#download-login-reset-pending').addEventListener('click', () => {
+    const accounts = state.browserAccounts.filter(account => account.totp_reset_pending?.secret).map(account => ({
+      email: account.email, password: account.openai_password || account.password, ...account.totp_reset_pending,
+    }));
+    downloadLoginFile(JSON.stringify({ warning: '新密钥尚未全部确认生效，请保留当前登录并核对状态', accounts }, null, 2), '2fa-reset-backup.json');
+  });
   elements.protocolLogoutAll?.addEventListener('click', () => protocolLogoutAllSessions());
   elements.selfLeaveWorkspaces?.addEventListener('click', () => selfLeaveAccountWorkspaces());
   elements.copyLoginResetOutput?.addEventListener("click", async () => {
@@ -4481,19 +4785,41 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     persistBrowserWorkspace();
     scheduleSessionMonitor();
   });
-  elements.pushConverted?.addEventListener('click', () => runPush(async target => selectedConverted().map(item => target === 'cpa' ? item.cpa : applySub2apiOutputConfig(item.sub2apiAccount))));
-  elements.retryPush?.addEventListener('click', () => runPush(async () => state.pushRetry?.accounts || [], { retry: true, upsert: state.pushRetry?.upsert === true }));
+  elements.loginRequireNonPersonal.addEventListener('change', () => {
+    clearLoginRetry(); updateLoginExportActions(); persistBrowserWorkspace();
+  });
+  elements.converterSkipFree?.addEventListener('change', async () => {
+    const isCurrent = workspaceTaskIsCurrent();
+    const previous = !elements.converterSkipFree.checked;
+    converterFilterSaving = true;
+    cancelHealthCheck();
+    updateOutput();
+    try { await persistBrowserWorkspace(true, true); }
+    catch (error) {
+      if (isCurrent()) {
+        elements.converterSkipFree.checked = previous;
+        setStatus(elements.pushStatus, `账号筛选设置保存失败：${error.message}`, 'error');
+      }
+    } finally {
+      if (isCurrent()) { converterFilterSaving = false; startHealthCheck({ force: false }); }
+    }
+  });
+  elements.pushConverted?.addEventListener('click', () => runPush(async target => convertedPushSelection().accounts.map(item => target === 'cpa' ? item.cpa : applySub2apiOutputConfig(item.sub2apiAccount)),
+    { emptyMessage: '当前范围没有可推送的账号；已按设置跳过 free 账号。' }));
+  elements.retryPush?.addEventListener('click', () => runPush(async () => state.pushRetry?.accounts || [], { retry: true, upsert: state.pushRetry?.upsert === true, target: pushFeedbackTarget() }));
   elements.reconcilePush?.addEventListener('click', reconcilePushOperation);
   elements.pushOperationHistory?.addEventListener('change', () => {
     state.activePushOperationId = elements.pushOperationHistory.value;
     renderPushResults();
     persistBrowserWorkspace();
   });
-  document.querySelector('#open-sub2-push-config')?.addEventListener('click', () => {
+  function openSub2PushConfig() {
     void loadLoginSub2Config();
     void loadLoginSub2Proxies({ silent: true });
     elements.sub2PushDialog.showModal();
-  });
+  }
+  document.querySelector('#open-sub2-push-config')?.addEventListener('click', openSub2PushConfig);
+  document.querySelector('#evaluation-sub2-config')?.addEventListener('click', openSub2PushConfig);
   document.querySelector('#open-cpa-push-config')?.addEventListener('click', () => {
     elements.cpaBaseUrl.value = state.cpaSettings.baseUrl || '';
     elements.cpaManagementKey.value = state.cpaSettings.managementKey || '';
@@ -4603,7 +4929,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     const button = event.target.closest?.('[data-device-index]');
     if (!button) return;
     const index = Number(button.dataset.deviceIndex);
-    const result = state.health.find(item => item.index === index);
+    const result = state.health.find(item => item?.index === index);
     if (!result) return;
     const account = state.format === "sub2api-tools" ? state.toolRecords[index]?.account : state.converted[index];
     openDeviceDetails(result, account?.name || account?.email);
@@ -4616,7 +4942,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   const selectOperation = (operation) => {
     elements.sub2apiOperation.value = operation;
     updateToolControls();
-    scheduleConvert();
+    updateOutput();
   };
   elements.operationButtons.forEach((button) => button.addEventListener("click", () => selectOperation(button.dataset.operation)));
   bindTabKeyboard("#tool-operation-buttons [role=\"tab\"]", (tab) => selectOperation(tab.dataset.operation));
@@ -4632,7 +4958,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     }
   }
   elements.splitScope?.addEventListener("change", updateOutput);
-  elements.mailInput?.addEventListener("input", scheduleConvert);
+  elements.mailInput?.addEventListener("input", updateOutput);
   elements.pickMailFile?.addEventListener("click", () => elements.mailFileInput?.click());
   elements.mailFileInput?.addEventListener("change", async (event) => {
     const isCurrent = workspaceTaskIsCurrent();
@@ -4641,7 +4967,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       const text = await file.text();
       if (!isCurrent()) return;
       elements.mailInput.value = text;
-      scheduleConvert();
+      updateOutput();
     }
     event.target.value = "";
   });
@@ -4682,6 +5008,9 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       node, value: node.value, checked: node.checked, disabled: node.disabled, type: node.type,
     }));
     const blockWorkspaceTasks = (release = false) => {
+      sharedHealth.clear();
+      freshHealth.clear();
+      knownHealthPlans.clear();
       evaluationEligibility = { accounts: [], total: 0, pending: false };
       teamCheckout.reset();
       modelEvaluation.reset();
@@ -4704,6 +5033,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       teamCheckout.reset();
       modelEvaluation.reset();
       pushBusy = false;
+      converterFilterSaving = false;
       const format = state.format;
       Object.assign(state, createWorkspaceState(), { format }, retained?.state, { loginProgress: new Map() });
       initialControls.forEach(({ node, value, checked, disabled, type }) => {
@@ -4722,6 +5052,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       elements.loginModalMessage.textContent = '';
       elements.loginResetCredentials.textContent = '';
       elements.loginResetOutput.classList.add('hidden');
+      renderTotpResetRecovery();
       elements.toggleLoginSub2Key.textContent = '显示';
       document.querySelector('#toggle-cpa-key').textContent = '显示';
       renderLogoutProgress();
@@ -4762,6 +5093,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
         syncMonitorChoice();
         elements.loginResetCredentials.textContent = saved.resetCredentials || '';
         elements.loginResetOutput.classList.toggle('hidden', !saved.resetCredentials);
+        renderTotpResetRecovery();
         renderLoginSub2Groups();
         renderLoginProgress();
         restoreLoginProxySettings();
@@ -4850,7 +5182,9 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     const config = await response.json();
     if (!Number.isInteger(config.taskConcurrency) || config.taskConcurrency < 1) throw new Error('并发配置无效');
     taskConcurrency = config.taskConcurrency;
+    modelEvaluation.refresh();
     elements.taskConcurrencyValue.textContent = String(taskConcurrency);
+    if (state.format === 'model-evaluation' && state.converted.length) startHealthCheck({ force: false });
   } catch {
     elements.taskConcurrencyValue.textContent = '按服务端设置';
   }

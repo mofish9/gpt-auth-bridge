@@ -124,7 +124,7 @@ test('protocol login UI exposes TOTP reset and renders the latest credentials', 
   assert.match(source, /account_start/);
   assert.match(source, /account_log/);
   assert.match(source, /account_done/);
-  assert.match(source, /\{ ids, concurrency, \.\.\.selectedLoginProxyNetwork\(\) \}/);
+  assert.match(source, /\{ ids, action, concurrency, \.\.\.selectedLoginProxyNetwork\(\) \}/);
   assert.match(source, /最新账号凭据/);
   assert.match(source, /credentials\.flatMap/);
   assert.match(server, /app\.post\('\/api\/v2\/accounts\/reset-totp'/);
@@ -149,7 +149,7 @@ test('sub2api logout all sessions is guarded by a fresh probe and supports concu
   const server = await fs.readFile(path.join(__dirname, '..', 'src', 'converter.js'), 'utf8');
 
   assert.match(source, /id="logout-all-sessions"[^>]*>退出全部会话<\/button>/);
-  assert.match(source, /state\.health\.some\(\(item\) => item\?\.status === 200\)/);
+  assert.match(source, /state\.converted\.some\(\(item, index\) => !skipFreeConverted\(item\) && state\.health\[index\]\?\.status === 200\)/);
   assert.match(source, /body: JSON\.stringify\(\{ accounts, concurrency: selectedTaskConcurrency\(\) \}\)/);
   assert.match(source, /正在退出/);
   assert.match(source, /logout-progress/);
