@@ -1559,8 +1559,10 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function formatLoginTime(value) {
-    return typeof value === "number" && value > 0 && Number.isFinite(value) && !Number.isNaN(new Date(value).getTime())
-      ? new Date(value).toLocaleString() : "未知";
+    const timestamp = typeof value === "number" ? value
+      : typeof value === "string" && value.trim() ? Date.parse(value) : NaN;
+    return timestamp > 0 && Number.isFinite(timestamp) && !Number.isNaN(new Date(timestamp).getTime())
+      ? new Date(timestamp).toLocaleString() : "未知";
   }
 
   function openDeviceDetails(result, name) {
@@ -2107,7 +2109,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
 
     elements.savedAccountsCount.textContent = query || filter !== 'all' ? `${matches.length}/${accounts.length} 个账号` : `${accounts.length} 个账号`;
     if (!matches.length) {
-      elements.savedAccountsBody.innerHTML = `<tr><td colspan="9" class="empty">${accounts.length ? '没有符合筛选条件的账号。' : '暂无已保存账号。'}</td></tr>`;
+      elements.savedAccountsBody.innerHTML = `<tr><td colspan="10" class="empty">${accounts.length ? '没有符合筛选条件的账号。' : '暂无已保存账号。'}</td></tr>`;
       if (elements.savedAccountsStatus) elements.savedAccountsStatus.textContent = accounts.length
         ? '可调整搜索或筛选条件。凭据、Cookie 和完整 Token 不会显示。'
         : '账号数据仅来自当前浏览器的加密工作区。';
@@ -2142,14 +2144,15 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       const personalCopy = hasRt ? `<button type="button" class="saved-account-copy" data-saved-copy-kind="personal-rt" data-saved-account-id="${escapeHtml(id)}">复制 RT</button>` : savedAccountBadge('无');
       const businessCopy = businessCount ? `<button type="button" class="saved-account-copy" data-saved-copy-kind="business-rt" data-saved-account-id="${escapeHtml(id)}">复制 RT${businessCount > 1 ? `（${businessCount}）` : ''}</button>` : savedAccountBadge(businessText, businessTone);
       return `<tr>
-        <td><button type="button" class="saved-account-copy saved-account-email-copy" data-saved-copy-kind="email" data-saved-account-id="${escapeHtml(id)}" title="点击复制邮箱">${escapeHtml(email || '未知邮箱')}</button><div class="saved-account-id">ID ${escapeHtml(id.slice(0, 12) || '-')}</div>${accountCopy}</td>
+        <td><button type="button" class="saved-account-copy saved-account-email-copy" data-saved-copy-kind="email" data-saved-account-id="${escapeHtml(id)}" title="点击复制邮箱">${escapeHtml(email || '未知邮箱')}</button>${accountCopy}</td>
         <td>${savedAccountBadge(loginStatus.text, loginStatus.tone || (attention ? 'warn' : ''))}</td>
         <td>${personalCopy}</td>
         <td>${businessCopy}</td>
         <td>${savedAccountBadge(healthText, healthTone)}</td>
         <td>${savedAccountBadge(push.text, push.tone)}</td>
         <td>${revivalCell}</td>
-        <td>${escapeHtml(formatLoginTime(account.updatedAt || account.createdAt) || '-')}</td>
+        <td class="saved-account-time">${escapeHtml(formatLoginTime(account.createdAt || account.created_at))}</td>
+        <td class="saved-account-time">${escapeHtml(formatLoginTime(account.updatedAt || account.createdAt) || '-')}</td>
         <td><button type="button" class="saved-account-delete" data-saved-delete-account="${escapeHtml(id)}">删除</button></td>
       </tr>`;
     }).join('');
