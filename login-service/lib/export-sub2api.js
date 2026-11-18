@@ -10,6 +10,7 @@ import {
   resolveOrganizationId,
 } from './jwt-utils.js';
 import { sub2ApiAccountDefaults } from './sub2api-settings.js';
+import { schedulingCredentials, validateSchedulingCredentials } from '../../docs/sub2api-scheduling.js';
 
 export const SUB2API_DEFAULT_EXPIRES_IN = 864000;
 export const SUB2API_SCHEMA_VERSION = 1;
@@ -58,6 +59,7 @@ function applyAccountSettings(account, defaults) {
     load_factor: defaults.loadFactor,
     rate_multiplier: defaults.rateMultiplier,
     auto_pause_on_expired: defaults.autoPauseOnExpired,
+    credentials: { ...account.credentials, ...schedulingCredentials(defaults) },
     extra: applyExtraSettings(account.extra, defaults),
   };
   if (defaults.expiresAt != null) next.expires_at = defaults.expiresAt;
@@ -149,6 +151,7 @@ export function assertSub2ApiAccountShape(account, { requireRefreshToken = true 
   if (account.type !== 'oauth') throw new Error('type must be oauth');
   const creds = account.credentials;
   if (!creds || typeof creds !== 'object' || Array.isArray(creds)) throw new Error('credentials 必须是对象');
+  validateSchedulingCredentials(creds);
   if (creds.auth_mode) {
     if (!creds.agent_runtime_id || !creds.agent_private_key) {
       throw new Error('agent credentials require agent_runtime_id and agent_private_key');

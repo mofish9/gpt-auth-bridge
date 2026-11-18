@@ -1,3 +1,5 @@
+import { normalizeSchedulingSettings } from '../../docs/sub2api-scheduling.js';
+
 export const SUB2API_DEFAULT_MODELS = Object.freeze([
   'gpt-5.5',
   'gpt-5.6-sol',
@@ -56,6 +58,7 @@ export function normalizeSub2ApiSettings(value = {}, defaults = {}) {
     adminApiKey: String(merged.adminApiKey || merged.admin_api_key || '').trim(),
     groupIds,
     legacyGroupName: groupIds.length ? '' : legacyGroupName,
+    ...normalizeSchedulingSettings(merged),
     accountConcurrency: clampNumber(merged.accountConcurrency ?? merged.concurrency, 50, 1, 100, { integer: true }),
     priority: clampNumber(merged.priority, 1, 1, 100, { integer: true }),
     loadFactor: clampNumber(merged.loadFactor ?? merged.load_factor, 1000, 1, 10000, { integer: true }),
@@ -102,6 +105,7 @@ export function publicSub2ApiSettings(value = {}) {
 export function sub2ApiAccountDefaults(value = {}) {
   const settings = normalizeSub2ApiSettings(value);
   return {
+    ...normalizeSchedulingSettings(settings),
     concurrency: settings.accountConcurrency,
     priority: settings.priority,
     loadFactor: settings.loadFactor,

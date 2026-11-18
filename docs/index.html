@@ -125,6 +125,43 @@
           </select>
         </label>
         <label class="push-checkbox-label wide"><input id="sub2api-auto-pause-on-expired" type="checkbox" checked /> 过期自动暂停调度</label>
+        <section class="push-scheduling-panel wide" aria-label="调度保护">
+          <h4>调度保护</h4>
+          <p class="push-scheduling-note">应用于新增账号；已有账号更新凭据时保留远端策略。</p>
+          <label>输入账号已有调度保护时<select id="sub2api-scheduling-policy-mode"><option value="preserve" selected>保留原配置</option><option value="override">覆盖为以下设置</option></select></label>
+          <p class="push-scheduling-note">无原配置的账号使用下方设置。</p>
+          <div class="push-protection-block">
+            <label class="push-checkbox-label"><input id="sub2api-overload-enabled" type="checkbox" role="switch" /> OpenAI 容量过载冷却</label>
+            <small>识别 OpenAI 容量错误后冷却整个账号，再尝试其他账号。</small>
+            <div class="push-scheduling-fields" data-scheduling-section="overload" hidden>
+              <label>冷却时间（分钟）<input id="sub2api-overload-minutes" type="number" min="1" max="120" step="1" value="10" disabled /></label>
+              <small>可设置 1–120 分钟。</small>
+            </div>
+          </div>
+          <div class="push-protection-block">
+            <label class="push-checkbox-label"><input id="sub2api-temp-enabled" type="checkbox" role="switch" /> 临时不可调度</label>
+            <small>状态码与任一关键词同时匹配时，按下列范围冷却。</small>
+            <div class="push-scheduling-fields" data-scheduling-section="temp" hidden>
+              <div class="push-scheduling-rule" data-scheduling-rule="overload">
+                <label class="push-checkbox-label"><input id="sub2api-temp-overload-enabled" type="checkbox" checked disabled /> 529 过载</label>
+                <div class="push-scheduling-rule-options">
+                  <label>冷却时间（分钟）<input id="sub2api-temp-overload-minutes" type="number" min="1" step="1" value="10" disabled /></label>
+                  <label>作用范围<select id="sub2api-temp-overload-scope" disabled><option value="model">模型级</option><option value="account">账号级</option></select></label>
+                </div>
+                <small>关键词：overloaded、too many</small>
+              </div>
+              <div class="push-scheduling-rule" data-scheduling-rule="rate-limit">
+                <label class="push-checkbox-label"><input id="sub2api-temp-rate-limit-enabled" type="checkbox" checked disabled /> 429 限流</label>
+                <div class="push-scheduling-rule-options">
+                  <label>冷却时间（分钟）<input id="sub2api-temp-rate-limit-minutes" type="number" min="1" step="1" value="10" disabled /></label>
+                  <label>作用范围<select id="sub2api-temp-rate-limit-scope" disabled><option value="model">模型级</option><option value="account">账号级</option></select></label>
+                </div>
+                <small>关键词：rate limit、too many requests</small>
+              </div>
+              <small>模型级仅冷却当前模型；模型未知时按账号级处理。</small>
+            </div>
+          </div>
+        </section>
       </div>
 
       <section class="evaluation-workbench hidden" id="model-evaluation" aria-labelledby="model-evaluation-title">
@@ -668,6 +705,43 @@
             <label>图片桥接策略<select id="login-sub2-image-bridge-strategy"><option value="inherit" selected>跟随渠道</option><option value="enabled">启用 Hosted 桥接</option><option value="disabled">不注入 Hosted 工具</option><option value="strip">移除客户端图片工具</option></select></label>
             <label>WS mode<select id="login-sub2-ws-mode"><option value="off" selected>关闭</option><option value="ctx_pool">上下文池</option><option value="passthrough">透传</option><option value="http_bridge">HTTP 桥接</option></select></label>
             <label class="push-checkbox-label wide"><input id="login-sub2-auto-pause-on-expired" type="checkbox" checked /> 过期自动暂停调度</label>
+        <section class="push-scheduling-panel wide" aria-label="调度保护">
+          <h4>调度保护</h4>
+          <p class="push-scheduling-note">应用于新增账号；已有账号更新凭据时保留远端策略。</p>
+          <label>输入账号已有调度保护时<select id="login-sub2-scheduling-policy-mode"><option value="preserve" selected>保留原配置</option><option value="override">覆盖为以下设置</option></select></label>
+          <p class="push-scheduling-note">无原配置的账号使用下方设置。</p>
+          <div class="push-protection-block">
+            <label class="push-checkbox-label"><input id="login-sub2-overload-enabled" type="checkbox" role="switch" /> OpenAI 容量过载冷却</label>
+            <small>识别 OpenAI 容量错误后冷却整个账号，再尝试其他账号。</small>
+            <div class="push-scheduling-fields" data-scheduling-section="overload" hidden>
+              <label>冷却时间（分钟）<input id="login-sub2-overload-minutes" type="number" min="1" max="120" step="1" value="10" disabled /></label>
+              <small>可设置 1–120 分钟。</small>
+            </div>
+          </div>
+          <div class="push-protection-block">
+            <label class="push-checkbox-label"><input id="login-sub2-temp-enabled" type="checkbox" role="switch" /> 临时不可调度</label>
+            <small>状态码与任一关键词同时匹配时，按下列范围冷却。</small>
+            <div class="push-scheduling-fields" data-scheduling-section="temp" hidden>
+              <div class="push-scheduling-rule" data-scheduling-rule="overload">
+                <label class="push-checkbox-label"><input id="login-sub2-temp-overload-enabled" type="checkbox" checked disabled /> 529 过载</label>
+                <div class="push-scheduling-rule-options">
+                  <label>冷却时间（分钟）<input id="login-sub2-temp-overload-minutes" type="number" min="1" step="1" value="10" disabled /></label>
+                  <label>作用范围<select id="login-sub2-temp-overload-scope" disabled><option value="model">模型级</option><option value="account">账号级</option></select></label>
+                </div>
+                <small>关键词：overloaded、too many</small>
+              </div>
+              <div class="push-scheduling-rule" data-scheduling-rule="rate-limit">
+                <label class="push-checkbox-label"><input id="login-sub2-temp-rate-limit-enabled" type="checkbox" checked disabled /> 429 限流</label>
+                <div class="push-scheduling-rule-options">
+                  <label>冷却时间（分钟）<input id="login-sub2-temp-rate-limit-minutes" type="number" min="1" step="1" value="10" disabled /></label>
+                  <label>作用范围<select id="login-sub2-temp-rate-limit-scope" disabled><option value="model">模型级</option><option value="account">账号级</option></select></label>
+                </div>
+                <small>关键词：rate limit、too many requests</small>
+              </div>
+              <small>模型级仅冷却当前模型；模型未知时按账号级处理。</small>
+            </div>
+          </div>
+        </section>
             <label class="wide">模型（逗号、空格或换行）<textarea id="login-sub2-models" rows="3" spellcheck="false">gpt-5.5&#10;gpt-5.6-sol&#10;gpt-5.6-terra&#10;gpt-6-astra</textarea><small>协议登录推送时，原始账号输入会作为 Sub2API 备注保存。</small></label>
           </div>
         </details>

@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import vm from 'node:vm';
 import { splitPasswordTotpLine } from '../docs/login-account-format.js';
 import { projectLoginAccounts, sharedAccountKey, healthCredentialKey, mergeSharedAccounts, loginCredentialLines } from '../docs/account-workspace.js';
+import { SCHEDULING_FIELDS, normalizeSchedulingSettings, applySchedulingCredentials, pickSchedulingCredentials } from '../docs/sub2api-scheduling.js';
 import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent } from '../docs/operation-contract.js';
 
 function createFakeElement(selector, options = {}) {
@@ -55,6 +56,8 @@ function createFakeElement(selector, options = {}) {
     showModal() { this.open = true; },
     remove() {},
     select() {},
+    closest() { return { querySelector: () => ({}) }; },
+    setCustomValidity(message) { this.validationMessage = message; },
     setAttribute(name, value) {
       this.attributes[name] = String(value);
     },
@@ -82,9 +85,12 @@ function loadPageScript(options = {}) {
     execCommand() {
       return true;
     },
+    getElementById(id) { return this.querySelector(`#${id}`); },
     querySelector(selector) {
       if (!elements.has(selector)) {
         elements.set(selector, createFakeElement(selector));
+        const field = SCHEDULING_FIELDS.find(item => ['#sub2api-', '#login-sub2-'].some(prefix => selector === prefix + item.suffix));
+        if (field) Object.assign(elements.get(selector), { type: field.type, value: String(field.default), checked: field.default === true });
       }
       return elements.get(selector);
     },
@@ -94,6 +100,7 @@ function loadPageScript(options = {}) {
   };
 
   const context = {
+    SCHEDULING_FIELDS, normalizeSchedulingSettings, applySchedulingCredentials, pickSchedulingCredentials,
     projectLoginAccounts, sharedAccountKey, healthCredentialKey, mergeSharedAccounts, loginCredentialLines,
     // Model evaluation has its own browser integration coverage.
     initializeModelEvaluation: () => ({ reset() {}, refresh() {} }),

@@ -1,4 +1,5 @@
 import { requestSignal } from '../src/services/request-scope.js';
+import { schedulingCredentialsMatch } from '../../docs/sub2api-scheduling.js';
 
 function sameModelMapping(expected, actual) {
   return expected != null && actual != null && typeof expected === 'object' && typeof actual === 'object'
@@ -173,7 +174,8 @@ export class Sub2ApiClient {
     const matchesSettings = credentialsOnly || (['concurrency', 'priority', 'load_factor'].every(field =>
       !Object.hasOwn(account, field) || row[field] === account[field])
       && (!Object.hasOwn(account.credentials, 'model_mapping') || sameModelMapping(account.credentials.model_mapping, row.credentials?.model_mapping))
-      && (!Object.hasOwn(account.extra || {}, 'codex_fingerprint_mode') || row.extra?.codex_fingerprint_mode === account.extra.codex_fingerprint_mode));
+      && (!Object.hasOwn(account.extra || {}, 'codex_fingerprint_mode') || row.extra?.codex_fingerprint_mode === account.extra.codex_fingerprint_mode)
+      && schedulingCredentialsMatch(account.credentials, row.credentials));
     if (matchesCredentials && matchesProxy && recoverState && !accountStateRecovered(row)) {
       return { status: 'failed', retryable: true, code: 'REMOTE_RECOVERY_INCOMPLETE', error: '凭据已更新，但账号错误状态或调度尚未恢复，可重试恢复' };
     }

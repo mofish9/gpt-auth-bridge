@@ -1398,6 +1398,19 @@ label:has(#login-push-sub2-only) { display: none !important; }
 .push-account-options summary { font-size: .85rem; font-weight: 600; cursor: pointer; }
 .push-account-options summary span { margin-left: 8px; font-size: .76rem; font-weight: 400; color: var(--muted); }
 .push-account-options .login-sub2-grid { margin-top: 14px; }
+.push-scheduling-panel { grid-column: 1 / -1; min-width: 0; border-top: 1px solid var(--line); padding-top: 14px; }
+.push-scheduling-panel h4 { margin: 0 0 5px; color: var(--text); font-size: .85rem; }
+.push-scheduling-note { margin: 0 0 12px; color: var(--muted); font-size: .75rem; line-height: 1.6; }
+.push-protection-block + .push-protection-block { margin-top: 14px; }
+.push-scheduling-panel .push-checkbox-label { display: flex; align-items: center; gap: 8px; margin: 0; cursor: pointer; }
+.push-scheduling-panel .push-checkbox-label input { flex: 0 0 auto; margin: 0; width: auto; min-height: 0; }
+.push-scheduling-panel small { display: block; margin-top: 5px; color: var(--muted); font-size: .73rem; line-height: 1.6; overflow-wrap: anywhere; }
+.push-scheduling-fields:not([hidden]) { display: grid; gap: 10px; margin-top: 10px; }
+.push-scheduling-fields[hidden] { display: none; }
+.push-scheduling-panel label:not(.push-checkbox-label) { display: grid; gap: 5px; min-width: 0; color: var(--muted); font-size: .78rem; }
+.push-scheduling-rule { padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
+.push-scheduling-rule-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 9px; }
+.push-scheduling-panel input:disabled, .push-scheduling-panel select:disabled { opacity: .55; }
 .push-config textarea { min-height: 86px; }
 .push-config-note { border-radius: 7px; padding: 12px 14px; background: var(--surface-soft); font-size: .82rem; }
 .push-config-note p { margin: 6px 0 0; color: var(--muted); line-height: 1.6; }

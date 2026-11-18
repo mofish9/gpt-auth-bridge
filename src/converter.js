@@ -30,6 +30,7 @@ const STATIC_FILES = Object.freeze({
   "/vendor/markdown-it.min.js": "../node_modules/markdown-it/dist/markdown-it.min.js",
   "/login-account-format.js": "login-account-format.js",
   "/validation-failure.js": "validation-failure.js",
+  "/sub2api-scheduling.js": "sub2api-scheduling.js",
   "/app.css": "app.css",
 });
 const CONTENT_TYPES = { ".js": "text/javascript; charset=utf-8", ".html": "text/html; charset=utf-8", ".svg": "image/svg+xml", ".css": "text/css; charset=utf-8" };

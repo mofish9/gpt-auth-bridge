@@ -2,6 +2,7 @@ import { splitPasswordTotpLine } from './login-account-format.js';
 import { initializeTeamCheckout } from './team-checkout.js';
 import { initializeModelEvaluation } from './model-evaluation.js';
 import { evaluationAccountOwner } from './evaluation-accounts.js';
+import { SCHEDULING_FIELDS, normalizeSchedulingSettings, applySchedulingCredentials, pickSchedulingCredentials } from './sub2api-scheduling.js';
 import { projectLoginAccounts, sharedAccountKey, healthCredentialKey, mergeSharedAccounts, loginCredentialLines } from './account-workspace.js';
 import { validationFailureHint, validationFailureFields, validationFailureLabel } from './validation-failure.js';
 import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent } from './operation-contract.js';
@@ -946,7 +947,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       ...(shouldSetAutoPause ? { auto_pause_on_expired: settings.autoPauseOnExpired } : {}),
       ...(settings.expiresAt != null ? { expires_at: settings.expiresAt } : {}),
       credentials: {
-        ...(account?.credentials || {}),
+        ...applySchedulingCredentials(account?.credentials || {}, settings),
         model_mapping: Object.fromEntries(settings.models.map((model) => [model, model])),
       },
       extra: { ...extra, codex_fingerprint_mode: settings.fingerprintMode },
@@ -1241,6 +1242,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       concurrency: 50,
       priority: 1,
       credentials: {
+        ...pickSchedulingCredentials(record.credentials || {}),
         access_token: accessToken,
         refresh_token: refreshToken,
         id_token: inputIdToken,
@@ -1911,7 +1913,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
       outputText = elements.sub2apiOperation.value === "split"
         ? (elements.splitScope.value === "unmatched" ? state.toolResult.unmatchedText : state.toolResult.matchedText)
         : state.toolResult.outputText;
-    } else if (!isLogin && hasConverted) {
+    } else if (!isTool && !isLogin && hasConverted) {
       outputText = JSON.stringify(buildOutputDocument(selected), null, 2);
     }
 
@@ -3127,6 +3129,9 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     let submitted = false;
     try {
       const settings = pushSettings(target);
+      if (target === 'sub2api' && !retry && !signal) {
+        for (const source of ['output', 'login']) normalizeSchedulingSettings(readSub2apiAccountConfig(source));
+      }
       pushBusy = true;
       updatePushControls();
       if (retry) {
@@ -3490,13 +3495,17 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   }
 
   function sub2apiAccountConfigFields(source) {
+    const prefix = source === 'login' ? 'login-sub2' : 'sub2api';
+    const scheduling = Object.fromEntries(SCHEDULING_FIELDS.map(field => [field.key, document.getElementById(`${prefix}-${field.suffix}`)]));
     return source === 'login' ? {
+      ...scheduling,
       accountConcurrency: elements.loginSub2Concurrency, priority: elements.loginSub2Priority,
       loadFactor: elements.loginSub2LoadFactor, fingerprintMode: elements.loginSub2FingerprintMode,
       expiresAt: elements.loginSub2ExpiresAt, imageBridgeStrategy: elements.loginSub2ImageBridgeStrategy,
       wsMode: elements.loginSub2WsMode, autoPauseOnExpired: elements.loginSub2AutoPauseOnExpired,
       models: elements.loginSub2Models,
     } : {
+      ...scheduling,
       accountConcurrency: elements.sub2apiConcurrency, priority: elements.sub2apiPriority,
       loadFactor: elements.sub2apiLoadFactor, fingerprintMode: elements.sub2apiFingerprintMode,
       expiresAt: elements.sub2apiExpiresAt, imageBridgeStrategy: elements.sub2apiImageBridgeStrategy,
@@ -3523,6 +3532,8 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   function readSub2apiAccountConfig(source) {
     const fields = sub2apiAccountConfigFields(source);
     return {
+      ...Object.fromEntries(SCHEDULING_FIELDS.map(field => [field.key, field.type === 'checkbox'
+        ? fields[field.key].checked : field.type === 'number' ? Number(fields[field.key].value) : fields[field.key].value])),
       accountConcurrency: Number(fields.accountConcurrency.value || 50),
       priority: Number(fields.priority.value || 1), loadFactor: Number(fields.loadFactor.value || 1000),
       fingerprintMode: fields.fingerprintMode.value || 'session',
@@ -3540,6 +3551,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     const models = [...new Set((Array.isArray(settings.models) ? settings.models : String(settings.models || '').split(/[\s,;]+/))
       .map(value => String(value).trim()).filter(Boolean))];
     return {
+      ...normalizeSchedulingSettings(settings, state.browserSettings.sub2apiSettings),
       accountConcurrency: integer(settings.accountConcurrency, 50, 100), priority: integer(settings.priority, 1, 100),
       loadFactor: integer(settings.loadFactor, 1000, 10000),
       fingerprintMode: ['off', 'device', 'session', 'full'].includes(settings.fingerprintMode) ? settings.fingerprintMode : 'session',
@@ -3556,11 +3568,29 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     state.browserSettings.sub2apiSettings = { ...state.browserSettings.sub2apiSettings, ...parameters };
     for (const source of ['output', 'login']) {
       for (const [key, field] of Object.entries(sub2apiAccountConfigFields(source))) {
+        field.setCustomValidity('');
         if (field === editingField) continue;
-        if (key === 'autoPauseOnExpired') field.checked = parameters.autoPauseOnExpired;
+        if (field.type === 'checkbox') field.checked = parameters[key];
         else if (key === 'expiresAt') field.value = formatSub2apiDateTime(parameters.expiresAt);
         else field.value = key === 'models' ? parameters.models.join(source === 'login' ? '\n' : ', ') : String(parameters[key]);
       }
+      syncSchedulingControls(source);
+    }
+  }
+
+  function syncSchedulingControls(source) {
+    const fields = sub2apiAccountConfigFields(source);
+    const panel = fields.openaiOverloadCooldownEnabled.closest('.push-scheduling-panel');
+    const overload = fields.openaiOverloadCooldownEnabled.checked;
+    const temp = fields.tempUnschedulableEnabled.checked;
+    panel.querySelector('[data-scheduling-section="overload"]').hidden = !overload;
+    fields.openaiOverloadCooldownMinutes.disabled = !overload;
+    panel.querySelector('[data-scheduling-section="temp"]').hidden = !temp;
+    for (const name of ['Overload', 'RateLimit']) {
+      const enabled = fields[`tempUnschedulable${name}Enabled`];
+      enabled.disabled = !temp;
+      fields[`tempUnschedulable${name}Minutes`].disabled = !temp || !enabled.checked;
+      fields[`tempUnschedulable${name}Scope`].disabled = !temp || !enabled.checked;
     }
   }
 
@@ -3666,6 +3696,7 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
     elements.saveLoginSub2Config.disabled = true;
     try {
       const settings = loginSub2ConfigPayload();
+      Object.assign(settings, normalizeSchedulingSettings(settings, state.browserSettings.sub2apiSettings));
       const hasConnection = Boolean(settings.baseUrl || settings.adminApiKey || settings.groupIds.length || settings.useProxy || settings.proxyId);
       if (hasConnection) {
         settings.baseUrl = normalizePushAddress(settings.baseUrl, 'sub2api');
@@ -4949,9 +4980,16 @@ import { OPERATION_SCHEMA_VERSION, validatePushResults, validateOperationEvent }
   for (const source of ['output', 'login']) {
     for (const [key, field] of Object.entries(sub2apiAccountConfigFields(source))) {
       const sync = event => {
-        setSub2apiAccountConfig(readSub2apiAccountConfig(source), event.type === 'input' ? field : null);
-        updateOutput();
-        persistBrowserWorkspace();
+        try {
+          setSub2apiAccountConfig(readSub2apiAccountConfig(source), event.type === 'input' ? field : null);
+          field.setCustomValidity('');
+          updateOutput();
+          persistBrowserWorkspace();
+        } catch (error) {
+          field.setCustomValidity(error.message);
+          syncSchedulingControls(source);
+          setStatus(elements.loginSub2Status, error.message, 'error');
+        }
       };
       if (key !== 'fingerprintMode') field?.addEventListener('input', sync);
       field?.addEventListener('change', sync);
